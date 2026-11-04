@@ -28,6 +28,9 @@ TD3 = Method("td3", "Continuous TD3 (offline)", "TD3", "#D55E00", "^")
 GNN = Method("gnn", "EdgeGAT GNN (offline)", "GNN", "#CC79A7", "D")
 HEURISTIC = Method("heuristic", "AIMD heuristic", "Heuristic", "#E69F00", "*", marker_scale=1.4)
 FIXED = Method("fixed", "Fixed period", "Fixed", "#555555", "X")
+# Reactive baselines of the learning campaign (they do not learn and ignore beta); they replace its heuristic.
+TRICKLE = Method("trickle", "Trickle (RFC 6206)", "Trickle", "#56B4E9", "v", marker_scale=1.2)
+GRADUAL = Method("gradual", "Gradual controller (AIMD)", "Gradual", "#E69F00", "P", marker_scale=1.2)
 
 LEARNED: tuple[Method, ...] = (QLEARNING, BCQ, TD3, GNN)
 ALL: tuple[Method, ...] = (*LEARNED, HEURISTIC, FIXED)

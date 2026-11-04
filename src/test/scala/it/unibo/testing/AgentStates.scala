@@ -41,5 +41,11 @@ object AgentStates:
   /** A node that has seen only itself, once. */
   val isolated: AgentState = of(me = 7, Map(7 -> Reading(Double.PositiveInfinity)))
 
+  /** Node 0 without neighbours, which computed `outputs` (oldest first) and had slept `lastPeriod` before its last
+    * round.
+    */
+  def alone(lastPeriod: Double, outputs: Double*): AgentState =
+    of(me = 0, outputs.map(output => Map(0 -> Reading(output, action = lastPeriod)))*)
+
   val fixtures: Seq[AgentState] = Seq(sourceMovingTowardsMe, neighbourBecameUnreachable, stableBackbone, isolated)
 end AgentStates

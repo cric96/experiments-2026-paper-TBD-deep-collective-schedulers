@@ -24,10 +24,12 @@ FOCUS_BETA = .95
 TRAIN_SEEDS = {'validation': (11, 12, 13, 14), 'test': (21, 22, 23, 24, 25, 26)}
 SPLITS = {'validation': (101, 102), 'test': (201, 202)}
 LEARNED = (0, 1)  # GNN, MLP
-# Fixed periods 0.5, 1, ..., 5 s and the heuristic: no learning, so their evaluation does not depend on the
+# Fixed periods 0.5, 1, ..., 5 s and the reactive baselines: no learning, so their evaluation does not depend on the
 # training seed (checked bit for bit); they run once per evaluation seed and are shared by every training seed.
 FIXED = (10, 3, 4, 5, 6, 7)
-HEURISTIC = 2
+# Trickle (RFC 6206) and the gradual (AIMD) controller of the period: they ignore beta, so they run at the focus beta
+# only. They replace the heuristic (algoId 2) of the campaigns before 2026-11-04.
+BASELINES = (11, 12)
 # (family, program, nodes, speed): program codes follow BuildingBlock (0 gradient, 1 hop, 2 broadcast, 3 collect,
 # 4 election); every policy is trained on the gradient only.
 STATIC = ('static', 0, 100, 0.)
@@ -40,8 +42,11 @@ SCENARIOS = {'validation': CORE, 'test': [STATIC, *DYNAMIC, *PROGRAMS, *SIZES]}
 # Test: the legacy control only where the previous experiments can be compared; beta study on the core scenarios.
 LEGACY_SCENARIOS = [STATIC, *DYNAMIC, *PROGRAMS]
 # Same objective for feature ablations. Legacy control alone uses the original objective.
+# Retention of the neighbours' data: with the message timing of Alchemist 25 (SendPreviousExport) an export arrives
+# up to one period old and is replaced one period later, so it must outlast two of the longest periods (5 s); 15 s
+# is the paper's value (the campaigns before 2026-11-04 used 6 s with the immediate send of Alchemist 45).
 COMMON = dict(warmStart=0, mobilityModel='Waypoint', costSignal='Staleness', lossScale=50.,
-              retention=6., trainingEvents='SourceSwitch,SourceSwitch,RegionStartsMoving,SourceSwitch,SourceSwitch,RegionStartsMoving',
+              retention=15., trainingEvents='SourceSwitch,SourceSwitch,RegionStartsMoving,SourceSwitch,SourceSwitch,RegionStartsMoving',
               trainingSpeeds='0,0,1,0,0,2', motionDuration=50., trainingEpisodes=10, episodes=20,
               stepsPerEpisode=440, finalMultiplier=1, ownSpeed=1, neighbourSpeed=1,
               errorTolerance=0., exportDirectory='', completeReplay=0)
@@ -59,10 +64,16 @@ VARIANTS = {
     'agnostic': dict(programAgnostic=1),
     # Diagnosis of the GNN transfer: `current` with one setting of the original experiment restored, then all three.
     # Cost and scale shape only the training costs; the retention changes the network, so its controls are its own.
+    # Run with the 6 s retention of that time (--set retention=6.0): 15 s is now the default.
     'error-cost': dict(unexplainedChange=1, dependants=1, costSignal='Error'),
     'wide-loss-scale': dict(unexplainedChange=1, dependants=1, lossScale=500.),
     'long-retention': dict(unexplainedChange=1, dependants=1, retention=15.),
     'paper-settings': dict(unexplainedChange=1, dependants=1, costSignal='Error', lossScale=500., retention=15.),
+    # Diagnosis of the gap between the original learner here and in the paper experiment (both with the Alchemist 25
+    # timing): the paper trained it with its default 110 gradient steps per episode and on source switches only.
+    'legacy-paper-steps': dict(legacy=True, stepsPerEpisode=110),
+    'legacy-static-training': dict(legacy=True, trainingEvents='SourceSwitch', trainingSpeeds='0'),
+    'legacy-paper-training': dict(legacy=True, stepsPerEpisode=110, trainingEvents='SourceSwitch', trainingSpeeds='0'),
 }
 FAMILIES = ('static', 'dynamic', 'generalization', 'beta-study', 'attention', 'filmstrip', 'learning')
 
@@ -136,35 +147,32 @@ def learned_jobs(split, variant, scenarios, betas, smoke=False, algorithms=LEARN
                   overrides=overrides)
 
 
-def shared_jobs(split, scenarios, beta_scenarios, smoke=False, overrides=None):
-    """Fixed periods and heuristic, once per evaluation seed (under the first training seed of the split)."""
+def shared_jobs(split, scenarios, smoke=False, overrides=None, algorithms=(*FIXED, *BASELINES)):
+    """Fixed periods and reactive baselines, once per evaluation seed (under the first training seed of the split)."""
     seed = TRAIN_SEEDS[split][0]
     for scenario, evaluation_seed in product(scenarios, seeds_of(split, smoke)[1]):
-        for algorithm in (*FIXED, HEURISTIC):
+        for algorithm in algorithms:
             yield job(split, 'fixed', algorithm, FOCUS_BETA, seed, evaluation_seed, scenario, smoke, shared=True,
                       overrides=overrides)
-        if scenario in beta_scenarios:
-            for beta in BETAS:
-                if beta != FOCUS_BETA:
-                    yield job(split, 'fixed', HEURISTIC, beta, seed, evaluation_seed, scenario, smoke, shared=True,
-                              overrides=overrides)
 
 
-def jobs(split, variants, smoke=False, shared=True, finals=None, algorithms=LEARNED, families=None, overrides=None):
+def jobs(split, variants, smoke=False, shared=True, finals=None, algorithms=LEARNED, families=None, overrides=None,
+         beta_study_only=False):
     """Validation: every variant on the core scenarios at the focus beta. Test: `variants` (the control and the
     selections) on every scenario, the legacy control on the comparable ones, and the beta study of the final variant
     of each architecture (`finals`: algorithm -> variant, by default the last of `variants`). `algorithms` and
-    `families` restrict a diagnostic campaign; `overrides` set a setting of every run, the controls included."""
+    `families` restrict a diagnostic campaign; `overrides` set a setting of every run, the controls included;
+    `beta_study_only` keeps only the other betas of the finals (a supplement to a test campaign that has the rest)."""
     scenarios = SCENARIOS[split]
     if smoke:
         scenarios = [STATIC, *PROGRAMS]
     if families:
         scenarios = [scenario for scenario in scenarios if scenario[0] in families]
-    for variant in variants:
+    for variant in ([] if beta_study_only else variants):
         yield from learned_jobs(split, variant, scenarios, [FOCUS_BETA], smoke, algorithms, overrides)
     beta_scenarios = []
     if split == 'test':
-        if 'legacy' not in variants:
+        if 'legacy' not in variants and not beta_study_only:
             yield from learned_jobs(split, 'legacy', [s for s in LEGACY_SCENARIOS if s in scenarios], [FOCUS_BETA], smoke,
                                     overrides=overrides)
         beta_scenarios = [s for s in CORE if s in scenarios]
@@ -173,14 +181,14 @@ def jobs(split, variants, smoke=False, shared=True, finals=None, algorithms=LEAR
             final = (finals or {}).get(algorithm, variants[-1])
             yield from learned_jobs(split, final, beta_scenarios, others, smoke, (algorithm,), overrides)
     if shared:
-        yield from shared_jobs(split, scenarios, beta_scenarios, smoke, overrides)
+        yield from shared_jobs(split, scenarios, smoke, overrides)
 
 
 def prepare(split, variants, smoke=False, name=None, shared=True, finals=None, algorithms=LEARNED, families=None,
-            overrides=None):
+            overrides=None, beta_study_only=False):
     home = HOME / (name or ('smoke' if smoke else split))
     home.mkdir(parents=True, exist_ok=True)
-    plan = list(jobs(split, variants, smoke, shared, finals, algorithms, families, overrides))
+    plan = list(jobs(split, variants, smoke, shared, finals, algorithms, families, overrides, beta_study_only))
     manifest = home / 'manifest.json'
     if manifest.exists():
         if json.loads(manifest.read_text()) != plan:
@@ -274,6 +282,8 @@ def main():
                         help='Only the scenarios of these families')
     parser.add_argument('--first', nargs='+', default=[], choices=('static', 'dynamic', 'generalization'),
                         help='Run the scenarios of these families before the others (e.g. static, for the beta study)')
+    parser.add_argument('--beta-study-only', action='store_true',
+                        help='Test: only the other betas of the selected variants (with --without-shared)')
     parser.add_argument('--set', dest='overrides', nargs='+', default=[], metavar='NAME=VALUE',
                         help='Setting of every run of the campaign, the shared controls included (e.g. retention=15)')
     args = parser.parse_args()
@@ -288,7 +298,7 @@ def main():
         variants = list(dict.fromkeys(['current', *finals.values()]))
     overrides = {name: json.loads(value) for name, value in (item.split('=', 1) for item in args.overrides)}
     home, plan = prepare(args.split, variants, args.smoke, args.name, not args.without_shared, finals,
-                         tuple(args.algorithms), args.families, overrides or None)
+                         tuple(args.algorithms), args.families, overrides or None, args.beta_study_only)
     print(f'{len(plan)} runs: {home}', flush=True)
     if args.action == 'run':
         with ThreadPoolExecutor(max_workers=args.workers) as executor:

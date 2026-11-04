@@ -40,7 +40,7 @@ final case class MobilityConfig(
     balanceScenarios: Boolean = false
 ):
   require(diffusion >= 0.0 && diffusion.isFinite && tolerance >= 0.0 && tolerance.isFinite)
-  require(beta >= 0.0 && beta <= 1.0 && algorithm >= 0 && algorithm <= 10)
+  require(beta >= 0.0 && beta <= 1.0 && MobilityConfig.Algorithms.contains(algorithm))
   require(trainingEpisodes >= 0 && episodes > trainingEpisodes)
   require(
     episodeLength > 0.0 && episodeLength.isFinite && movementInterval > 0.0 && movementInterval.isFinite && recoveryDwell > 0.0
@@ -113,3 +113,8 @@ object MobilityConfig:
   val TransferMLP: Int = 8
   val TransferGNN: Int = 9
   val FastestBaseline: Int = 10
+
+  /** The `algoId`s of simulationMobility.yml: the learners (0, 1, 8, 9), the heuristic (2), the fixed periods (3–7,
+    * 10), Trickle (11) and the gradual controller (12).
+    */
+  val Algorithms: Range = 0 to 12

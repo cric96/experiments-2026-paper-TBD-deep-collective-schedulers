@@ -2,7 +2,7 @@
 
 Every point is a mean over the (training seed, evaluation seed) pairs, after averaging the evaluation episodes of a
 pair; whiskers are crossed-bootstrap 95% intervals (training and evaluation seeds resampled independently). The
-fixed periods and the heuristic do not learn, so the same runs are paired with every training seed.
+fixed periods and the reactive baselines do not learn, so the same runs are paired with every training seed.
 """
 
 from __future__ import annotations
@@ -16,10 +16,11 @@ from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
 
 from .. import methods, style
 from ..campaign import PAIR, crossed_interval
-from experiments.campaign import BETAS, FIXED, FOCUS_BETA, HEURISTIC, LEARNED
+from experiments.campaign import BASELINES, BETAS, FIXED, FOCUS_BETA, LEARNED
 
 ARCHITECTURES = {0: methods.GNN, 1: methods.TD3}
 ARCHITECTURE_LABELS = {0: "GNN", 1: "MLP"}
+BASELINE_METHODS = dict(zip(BASELINES, (methods.TRICKLE, methods.GRADUAL)))
 FIXED_PERIODS = dict(zip(FIXED, (0.5, 1.0, 2.0, 3.0, 4.0, 5.0)))
 VARIANT_LABELS = {
     "current": "Current",
@@ -35,6 +36,9 @@ VARIANT_LABELS = {
     "wide-loss-scale": "500 m loss scale",
     "long-retention": "15 s retention",
     "paper-settings": "Original cost, scale, retention",
+    "legacy-paper-steps": "Legacy, 110 steps per episode",
+    "legacy-static-training": "Legacy, source switches only",
+    "legacy-paper-training": "Legacy, paper training",
 }
 PROGRAMS = {0: "Gradient", 1: "Hop count", 2: "Broadcast", 3: "Collect", 4: "Election"}
 PHASES = {"bootstrap": "Start-up\n0–40 s", "quiet": "Stable\n40–100 s", "event": "Event\n100–150 s",
@@ -103,14 +107,15 @@ def plot_point(ax, rows: pd.DataFrame, method: methods.Method, role: str, label:
 
 
 def pareto_panel(ax, episodes: pd.DataFrame, where: tuple, finals: dict[int, str], phase: str = "whole") -> None:
-    """Rounds vs error: fixed-period frontier, heuristic, and the variants compared for each architecture."""
+    """Rounds vs error: fixed-period frontier, reactive baselines, and the variants compared for each architecture."""
     rows = scenario(episodes, *where, phase=phase)
     frontier = fixed_frontier(rows)
     ax.plot(frontier.roundsPerNodeSecond, frontier.normalizedError, **style.fixed_period_style(label="Fixed period"))
     style.label_fixed_periods(ax, frontier.roundsPerNodeSecond, frontier.normalizedError, frontier.period)
-    heuristic = rows[(rows.algorithm == HEURISTIC) & (rows.beta == FOCUS_BETA)]
-    if not heuristic.empty:
-        plot_point(ax, heuristic, methods.HEURISTIC, "final", methods.HEURISTIC.short)
+    for algorithm, method in BASELINE_METHODS.items():
+        baseline = rows[rows.algorithm == algorithm]
+        if not baseline.empty:
+            plot_point(ax, baseline, method, "final", method.short)
     for algorithm in LEARNED:
         for role, variant in roles(finals[algorithm]).items():
             learned = select(rows, variant, algorithm)
@@ -267,7 +272,8 @@ def scenario_label(family: str, program: int, nodes: int, speed: float) -> str:
 
 
 def beta_figure(episodes: pd.DataFrame, out: Path, finals: dict[int, str], scenarios: list[tuple]) -> None:
-    """Rounds vs error of the separately trained policies at every beta, with the heuristic at the same betas."""
+    """Rounds vs error of the separately trained policies at every beta, with the reactive baselines (one point each:
+    they ignore beta)."""
     columns = 3
     rows_count = int(np.ceil(len(scenarios) / columns))
     fig, axes = style.figure("double", 2.1 * rows_count, nrows=rows_count, ncols=columns, squeeze=False,
@@ -276,10 +282,13 @@ def beta_figure(episodes: pd.DataFrame, out: Path, finals: dict[int, str], scena
         rows = scenario(episodes, *where)
         frontier = fixed_frontier(rows)
         ax.plot(frontier.roundsPerNodeSecond, frontier.normalizedError, **style.fixed_period_style(label="Fixed period"))
+        for algorithm, method in BASELINE_METHODS.items():
+            point = rows[rows.algorithm == algorithm][["roundsPerNodeSecond", "normalizedError"]].mean()
+            ax.plot(point.roundsPerNodeSecond, point.normalizedError, linestyle="none",
+                    **style.line_style(method, label=method.short))
         for key, method, label in [((finals[algorithm], algorithm), ARCHITECTURES[algorithm],
                                     f"{ARCHITECTURE_LABELS[algorithm]}, {VARIANT_LABELS[finals[algorithm]].lower()}")
-                                   for algorithm in LEARNED] + [(("fixed", HEURISTIC), methods.HEURISTIC,
-                                                                 methods.HEURISTIC.short)]:
+                                   for algorithm in LEARNED]:
             subset = rows[(rows.variant == key[0]) & (rows.algorithm == key[1])]
             means = subset.groupby("beta")[["roundsPerNodeSecond", "normalizedError"]].mean().reindex(BETAS)
             ax.plot(means.roundsPerNodeSecond, means.normalizedError, linewidth=0.8,

@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from experiments.campaign import FOCUS_BETA, HEURISTIC, LEARNED
-from .figures.campaign import ARCHITECTURE_LABELS, PROGRAMS, VARIANT_LABELS, scenario_label
+from experiments.campaign import BASELINES, FOCUS_BETA, LEARNED
+from .figures.campaign import ARCHITECTURE_LABELS, BASELINE_METHODS, PROGRAMS, VARIANT_LABELS, scenario_label
 
 PHASE_ORDER = ("whole", "bootstrap", "quiet", "event", "after")
 # Phases where the values change: elsewhere every schedule holds exact values and the gain is undefined.
@@ -36,8 +36,8 @@ def interval(row: pd.Series, value: str, scale: float = 100.0, digits: int = 0) 
 
 
 def method_label(variant: str, algorithm: int) -> str:
-    if algorithm == HEURISTIC:
-        return "Heuristic"
+    if algorithm in BASELINES:
+        return BASELINE_METHODS[algorithm].short
     return f"{ARCHITECTURE_LABELS[algorithm]}, {VARIANT_LABELS.get(variant, variant).lower()}"
 
 

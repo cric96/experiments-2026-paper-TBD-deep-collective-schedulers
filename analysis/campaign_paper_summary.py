@@ -17,11 +17,11 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
-from experiments.campaign import BETAS, FIXED, FOCUS_BETA, HEURISTIC, LEARNED, PROGRAMS, STATIC
+from experiments.campaign import BASELINES, BETAS, FIXED, FOCUS_BETA, LEARNED, PROGRAMS, STATIC
 from . import methods, results, style
 from .campaign_paper import (LABELS, architecture, episode_table, of_scenario, reward_at)
 from .figures import tradeoff
-from .figures.campaign import FIXED_PERIODS, VARIANT_LABELS
+from .figures.campaign import BASELINE_METHODS, FIXED_PERIODS, VARIANT_LABELS
 from .figures.common import METRIC_LABELS
 
 KEYS = {0: methods.GNN.key, 1: methods.TD3.key}
@@ -91,8 +91,8 @@ def overview_entries(finals: dict[int, str]) -> list[tuple[str, str, str, float,
     entries = [(f"Fixed {period:g} s", methods.FIXED_PERIOD_GREYS[period], methods.FIXED.marker, 1.0,
                 dict(algorithm=next(code for code, value in FIXED_PERIODS.items() if value == period)))
                for period in OVERVIEW_PERIODS]
-    entries.append((methods.HEURISTIC.label, methods.HEURISTIC.color, methods.HEURISTIC.marker, 1.0,
-                    dict(algorithm=HEURISTIC)))
+    entries += [(method.label, method.color, method.marker, 1.0, dict(algorithm=algorithm))
+                for algorithm, method in BASELINE_METHODS.items()]
     for algorithm in LEARNED:
         method = architecture(algorithm, finals)
         entries.append((method.label, method.color, method.marker, 1.0,
@@ -112,7 +112,7 @@ def pair_values(table: pd.DataFrame, selection: dict, metric: str, training: int
 
 def generalization_overview(home: Path, jobs: list[dict], finals: dict[int, str], training: int, out: Path) -> None:
     """Recovery time, error relative to the 5 s period and rounds on each program (zero-shot but the gradient)."""
-    wanted = [job for job in jobs if job["beta"] == FOCUS_BETA and (job["algorithm"] in (*FIXED, HEURISTIC)
+    wanted = [job for job in jobs if job["beta"] == FOCUS_BETA and (job["algorithm"] in (*FIXED, *BASELINES)
                                                                       or job["variant"] in (*finals.values(), "legacy"))]
     tables = [episode_table(home, of_scenario(wanted, scenario)) for scenario, _ in OVERVIEW_SCENARIOS]
     entries = overview_entries(finals)

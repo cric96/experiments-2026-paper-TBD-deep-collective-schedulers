@@ -6,7 +6,7 @@ python -m analysis.campaign_paper build/learning-campaign/test --out charts
 
 The learned methods are the final variant of each architecture (the one of its beta study). Bands and whiskers are 95%
 t-intervals over the training seeds, after averaging the evaluation topologies of each seed and the evaluation
-episodes of each run. The fixed periods and the heuristic do not learn: they are means over the topologies.
+episodes of each run. The fixed periods and the reactive baselines do not learn: they are means over the topologies.
 """
 
 from __future__ import annotations
@@ -24,12 +24,12 @@ import pandas as pd
 from matplotlib.lines import Line2D
 from matplotlib.ticker import NullLocator
 
-from experiments.campaign import BETAS, DYNAMIC, FIXED, FOCUS_BETA, HEURISTIC, LEARNED, PROGRAMS, STATIC, TRAIN_SEEDS
+from experiments.campaign import BASELINES, BETAS, DYNAMIC, FIXED, FOCUS_BETA, LEARNED, PROGRAMS, STATIC, TRAIN_SEEDS
 from . import methods, style
 from .campaign import EPISODE_LENGTH
 from .campaign_snapshots import EMBEDDINGS, INSPECTED_EVALUATION_SEED
 from .figures import gnn, gnn_programs
-from .figures.campaign import FIXED_PERIODS, VARIANT_LABELS
+from .figures.campaign import BASELINE_METHODS, FIXED_PERIODS, VARIANT_LABELS
 from .figures.common import mean_band, method_band, thousands
 from .figures.tradeoff import _period_axis
 from .pareto import frontier_value_at
@@ -87,9 +87,9 @@ def of_scenario(jobs: list[dict], scenario: tuple) -> list[dict]:
 
 
 def relevant(job: dict, finals: dict[int, str]) -> bool:
-    """The final variant of each architecture, the fixed periods and the heuristic."""
+    """The final variant of each architecture, the fixed periods and the reactive baselines."""
     return (job["algorithm"] in LEARNED and job["variant"] == finals[job["algorithm"]]) or \
-        job["algorithm"] in (*FIXED, HEURISTIC)
+        job["algorithm"] in (*FIXED, *BASELINES)
 
 
 def episode_table(home: Path, jobs: list[dict]) -> pd.DataFrame:
@@ -240,15 +240,16 @@ def pareto_axes(ax, metric: str) -> None:
 
 
 def pareto_panel(ax, table: pd.DataFrame, metric: str, finals: dict[int, str], training: int) -> None:
-    """Fixed-period frontier, heuristic and learned beta sweeps; the gain of the final GNN at the focus beta."""
+    """Fixed-period frontier, reactive baselines (one point each: they ignore beta) and learned beta sweeps; the gain
+    of the final GNN at the focus beta."""
     evaluation = table[table.episode > training]
     frontier = evaluation[evaluation.algorithm.isin(FIXED)].groupby("algorithm")[["rounds", metric]].mean()
     frontier = frontier.assign(period=[FIXED_PERIODS[code] for code in frontier.index]).sort_values("rounds")
     ax.plot(frontier.rounds, frontier[metric], **style.fixed_period_style())
     style.label_fixed_periods(ax, frontier.rounds, frontier[metric], frontier.period)
-    heuristic = evaluation[evaluation.algorithm == HEURISTIC].groupby("beta")[["rounds", metric]].mean()
-    ax.plot(heuristic.rounds, heuristic[metric], linewidth=0.7, alpha=0.8,
-            **style.line_style(methods.HEURISTIC, label=None))
+    for algorithm, method in BASELINE_METHODS.items():
+        baseline = evaluation[evaluation.algorithm == algorithm][["rounds", metric]].mean()
+        ax.plot(baseline.rounds, baseline[metric], linestyle="none", **style.line_style(method, label=None))
     for algorithm in LEARNED:
         method = architecture(algorithm, finals)
         points = []
@@ -273,7 +274,7 @@ def pareto_panel(ax, table: pd.DataFrame, metric: str, finals: dict[int, str], t
 def pareto_legend(fig, finals: dict[int, str]) -> None:
     handles = [style.legend_handle(architecture(algorithm, finals), linestyle="-", linewidth=0.7)
                for algorithm in LEARNED]
-    handles.append(style.legend_handle(methods.HEURISTIC, linestyle="-", linewidth=0.7))
+    handles += [style.legend_handle(method, linestyle="none") for method in BASELINE_METHODS.values()]
     handles.append(Line2D([], [], **style.fixed_period_style(label="Fixed period (0.5–5 s)")))
     style.figure_legend(fig, handles, ncol=len(handles))
 

@@ -18,6 +18,11 @@ class MobilityConfigSpec extends AnyFlatSpec with Matchers:
       "seed1_algo0_D1.0_tol5.0_beta0.95_dt0.25_train10_length200.0_sourcetrue_warm"
   }
 
+  "The configuration" should "accept the algorithms of the simulation file only" in {
+    MobilityConfig.Algorithms.foreach(algorithm => MobilityConfig(1, algorithm).algorithm shouldBe algorithm)
+    an[IllegalArgumentException] should be thrownBy MobilityConfig(1, MobilityConfig.Algorithms.end + 1)
+  }
+
   "The mobility level" should "cycle the training levels of the model, then use the evaluation one" in {
     val waypoint = MobilityConfig(1, 0, model = MobilityModel.Waypoint, speed = 1.5)
     (0 until 4).map(waypoint.levelAt) shouldBe Seq(0.0, 1.0, 2.0, 0.0)
