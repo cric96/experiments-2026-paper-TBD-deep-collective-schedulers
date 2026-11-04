@@ -1,0 +1,35 @@
+incarnation: scafi
+
+# Two nodes in range wake up every second, half a second apart (1, 2, 3 s and 1.5, 2.5, 3.5 s), and send the export of
+# their previous round when they wake up, before computing (SendPreviousExport).
+_constants:
+  retentionTime: &retentionTime 10
+  range: &range 10
+
+network-model:
+  type: ConnectWithinDistance
+  parameters: [*range]
+
+deployments:
+  - type: Point
+    parameters: [0, 0]
+    programs:
+      - - time-distribution:
+            type: DiracComb
+            parameters: [1.0, 1.0]
+          type: GenericReaction
+          actions:
+            - type: SendPreviousExport
+            - type: RunScafiProgram
+              parameters: [it.unibo.testing.NeighbourRound, *retentionTime]
+  - type: Point
+    parameters: [5, 0]
+    programs:
+      - - time-distribution:
+            type: DiracComb
+            parameters: [1.5, 1.0]
+          type: GenericReaction
+          actions:
+            - type: SendPreviousExport
+            - type: RunScafiProgram
+              parameters: [it.unibo.testing.NeighbourRound, *retentionTime]

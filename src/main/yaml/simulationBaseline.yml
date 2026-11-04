@@ -93,9 +93,10 @@ _reactions:
           parameters: "nextWakeUp"
         type: GenericReaction
         actions:
+          # The export of the previous round, sent at wake-up as in Alchemist 25 (replaces `- program: send`).
+          - type: SendPreviousExport
           - type: RunScafiProgram
             parameters: [it.unibo.scafi.Main, *retentionTime]
-      - program: send
 
 deployments: ## i.e, how to place nodes
   type: Grid

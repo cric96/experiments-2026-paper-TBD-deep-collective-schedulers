@@ -19,11 +19,31 @@ final case class RelabelledStep(
     beta: Double,
     intensity: Double,
     isTerminal: Boolean,
-    discount: Float
+    discount: Float,
+    errorIntegral: Option[Double] = None,
+    energyCost: Double = 1.0,
+    deferredBeta: Option[DeferredBeta] = None
 ):
   def isUnstable: Boolean = intensity > 0.0
 
   def terminalFlag: Float = if isTerminal then 1.0f else 0.0f
+
+  def conditionedState: Array[Float] = DeferredBeta.conditioned(state, deferredBeta)
+
+  def conditionedNextState: Array[Float] = DeferredBeta.conditioned(nextState, deferredBeta)
+
+/** The β feature that still has to be written into features shared by the relabelled copies of a step: each copy would
+  * otherwise hold its own conditioned arrays, and a mobile replay could keep only a fraction of an episode.
+  */
+final case class DeferredBeta(index: Int, value: Float):
+  def applyTo(features: Array[Float]): Array[Float] =
+    val conditioned = features.clone()
+    conditioned(index) = value
+    conditioned
+
+object DeferredBeta:
+  def conditioned(features: Array[Float], deferred: Option[DeferredBeta]): Array[Float] =
+    deferred.fold(features)(_.applyTo(features))
 
 /** Hindsight relabelling of the trajectories collected with one trade-off weight for many others. */
 object Relabelling:
@@ -47,6 +67,17 @@ object Relabelling:
       ownWeight: Double,
       gamma: Double,
       encode: AgentState => Array[Float],
+      betaFeatureIndex: Int,
+      mobile: Boolean = false
+  ): Seq[RelabelledStep] =
+    if mobile then relabelMobile(trajectory, ownWeight, gamma, encode, betaFeatureIndex)
+    else relabelLegacy(trajectory, ownWeight, gamma, encode, betaFeatureIndex)
+
+  private def relabelLegacy(
+      trajectory: Trajectory,
+      ownWeight: Double,
+      gamma: Double,
+      encode: AgentState => Array[Float],
       betaFeatureIndex: Int
   ): Seq[RelabelledStep] =
     val states = trajectory.map(step => encode(step.state)).toIndexedSeq
@@ -58,6 +89,36 @@ object Relabelling:
       targetWeights(ownWeight).map { beta =>
         def conditioned(features: Array[Float]) = withBetaFeature(features, beta, betaFeatureIndex)
         RelabelledStep(step, conditioned(states(index)), conditioned(nextState), beta, intensity, isTerminal, discount)
+      }
+    }
+
+  private def relabelMobile(
+      trajectory: Trajectory,
+      ownWeight: Double,
+      gamma: Double,
+      encode: AgentState => Array[Float],
+      betaFeatureIndex: Int
+  ): Seq[RelabelledStep] =
+    trajectory.flatMap { step =>
+      val outcome =
+        step.mobileOutcome.getOrElse(throw new IllegalArgumentException("Mobile training requires measured outcomes"))
+      outcome.errorIntegrals.toSeq.sortBy(_._1).flatMap { case (tolerance, cost) =>
+        val current = encode(step.state.copy(tolerance = tolerance))
+        val next = encode(outcome.nextState.copy(tolerance = tolerance))
+        targetWeights(ownWeight).map { beta =>
+          RelabelledStep(
+            step,
+            current,
+            next,
+            beta,
+            if cost > 0.0 then 1.0 else 0.0,
+            outcome.terminal,
+            math.pow(gamma, outcome.duration).toFloat,
+            Some(cost),
+            outcome.energy,
+            Some(DeferredBeta(betaFeatureIndex, beta.toFloat))
+          )
+        }
       }
     }
 

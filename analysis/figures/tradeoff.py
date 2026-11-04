@@ -13,7 +13,7 @@ from matplotlib.ticker import FuncFormatter, NullLocator, PercentFormatter
 from .. import config, style
 from ..data import select
 from ..dataset import Dataset
-from ..methods import FIXED, LEARNED, TD3
+from ..methods import FIXED, TD3
 from ..results import FRONTIER_GAINS, fixed_frontier, fixed_runs
 from ..stats import t_interval
 from .common import METRIC_LABELS, ci_of, errorbar, thousands
@@ -35,8 +35,8 @@ def tradeoff_vs_beta(data: Dataset, out: Path) -> None:
     metrics = ("ticks", "unstable", "error")
     fig, axes = style.figure("double", 2.0, 1, len(metrics))
     for ax, metric in zip(axes, metrics):
-        for index, method in enumerate(LEARNED):
-            offset = (index - (len(LEARNED) - 1) / 2) * DODGE
+        for index, method in enumerate(data.methods):
+            offset = (index - (len(data.methods) - 1) / 2) * DODGE
             intervals = [ci_of(select(data.evaluation, method.key, weight=w)[metric]) for w in config.WEIGHTS]
             means = np.array([ci.mean for ci in intervals])
             errors = np.array([[ci.mean - ci.low for ci in intervals], [ci.high - ci.mean for ci in intervals]])
@@ -45,7 +45,7 @@ def tradeoff_vs_beta(data: Dataset, out: Path) -> None:
         if metric == "ticks":
             thousands(ax, "y")
         _beta_axis(ax)
-    style.figure_legend(fig, [style.legend_handle(m) for m in LEARNED], ncol=len(LEARNED))
+    style.figure_legend(fig, [style.legend_handle(m) for m in data.methods], ncol=len(data.methods))
     style.save(fig, out, "tradeoff_vs_beta")
 
 
@@ -82,7 +82,7 @@ def pareto_frontiers(data: Dataset, out: Path) -> None:
         frontier = fixed_frontier(data.evaluation, metric)
         ax.plot(frontier.ticks, frontier[metric], **style.fixed_period_style())
         style.label_fixed_periods(ax, frontier.ticks, frontier[metric], frontier.period)
-        for method in LEARNED:
+        for method in data.methods:
             points = []
             for weight in config.WEIGHTS:
                 runs = select(data.evaluation, method.key, weight=weight)
@@ -111,7 +111,7 @@ def pareto_frontiers(data: Dataset, out: Path) -> None:
         ax.set_ylabel(METRIC_LABELS[metric])
         ax.margins(y=0.1)
         _period_axis(ax)
-    handles = [style.legend_handle(m, linestyle="-", linewidth=0.7) for m in LEARNED]
+    handles = [style.legend_handle(m, linestyle="-", linewidth=0.7) for m in data.methods]
     handles.append(Line2D([], [], **style.fixed_period_style()))
     style.figure_legend(fig, handles, ncol=len(handles))
     style.save(fig, out, "pareto_frontiers")
@@ -132,7 +132,7 @@ def frontier_gains_heatmap(data: Dataset, out: Path) -> None:
     fig, axes = style.figure("double", 2.05, 1, len(names), sharey=True)
     for ax, name in zip(axes, names):
         table = gains[gains.gain == name].pivot(index="method", columns="weight")
-        rows = [m.key for m in LEARNED]
+        rows = [m.key for m in data.methods]
         mean, low, high = (table[column].reindex(rows).to_numpy() for column in ("mean", "low", "high"))
         image = ax.imshow(np.nan_to_num(mean, nan=0.0), cmap="RdBu", norm=norm, aspect="auto")
         for (r, c), value in np.ndenumerate(mean):
@@ -151,7 +151,7 @@ def frontier_gains_heatmap(data: Dataset, out: Path) -> None:
                 linespacing=1.1,
             )
         ax.set_xticks(range(len(config.WEIGHTS)), [f"{w:g}" for w in config.WEIGHTS])
-        ax.set_yticks(range(len(rows)), [m.short for m in LEARNED])
+        ax.set_yticks(range(len(rows)), [m.short for m in data.methods])
         ax.set_xlabel("Trade-off weight $\\beta$")
         ax.set_title(FRONTIER_GAINS[name].capitalize())
         ax.grid(False)
@@ -177,7 +177,7 @@ def summary_beta095(data: Dataset, out: Path) -> None:
     for period in SUMMARY_PERIODS:
         runs = baseline[np.isclose(baseline.period, period)]
         rows.append((f"Fixed {period:g} s", style.fixed_period_color(period), FIXED.marker, runs))
-    for method in LEARNED:
+    for method in data.methods:
         rows.append((method.short, method.color, method.marker, select(data.evaluation, method.key, weight=weight)))
     positions = np.arange(len(rows))[::-1]
     rng = np.random.default_rng(config.RANDOM_SEED)

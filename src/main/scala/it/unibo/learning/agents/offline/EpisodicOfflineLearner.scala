@@ -14,18 +14,21 @@ abstract class EpisodicOfflineLearner[T](
     runSeed: Double,
     weight: Double,
     protected val schedule: TrainingSchedule,
-    batchSize: Int
+    batchSize: Int,
+    transitionCapacity: Int = Int.MaxValue
 ) extends Learner:
   private var randomness: Random = LearnerSeeds.random(runSeed, weight)
   private val rootManager: NDManager = NDManager.newBaseManager()
   private var episode: Int = 0
 
-  protected val transitions: StratifiedTransitions[T] = StratifiedTransitions[T]
+  protected val transitions: StratifiedTransitions[T] = StratifiedTransitions[T](transitionCapacity)
 
   /** The episode in progress (0-based); during [[onTrained]] it is the episode that has just ended. */
   protected def currentEpisode: Int = episode
 
   protected def random: Random = randomness
+
+  override def trainingScenario(scenario: Int): Unit = transitions.scenario(scenario)
 
   override def injectRandom(random: Random): Unit = randomness = random
 

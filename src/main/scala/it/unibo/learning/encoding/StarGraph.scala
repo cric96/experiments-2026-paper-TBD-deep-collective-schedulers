@@ -21,6 +21,12 @@ object StarGraph:
   /** Position of the β feature among the ego features. */
   val BetaFeature: Int = SelfDim - 1
 
+  /** Position of the children ratio among the ego features. */
+  val ChildrenFeature: Int = 3
+
+  /** Position of the relative order of the outputs within a neighbour slot. */
+  val RelativeOrderFeature: Int = 3
+
   /** Distance that normalizes the neighbours' distances to [0, 1]. */
   val MaxDistance: Double = 100.0
 

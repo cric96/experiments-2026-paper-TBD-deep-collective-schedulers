@@ -6,7 +6,7 @@ import it.unibo.alchemist.model.*
 import it.unibo.learning.abstractions.{AgentState, ReplayBuffer, Step}
 import it.unibo.learning.agents.Learner
 import it.unibo.learning.{Box, LearningInfo}
-import it.unibo.scafi.{BuildingBlock, EvaluationProtocol, GroundTruths, Sensors, Topology}
+import it.unibo.scafi.{BuildingBlock, EvaluationProtocol, GroundTruths, SchedulingCoordinator, Sensors, Topology}
 
 import scala.collection.immutable.Queue
 import scala.jdk.CollectionConverters.*
@@ -22,7 +22,8 @@ final class CentralAgent[T, P <: Position[P]](
     learningInfo: LearningInfo,
     learner: Learner,
     environmentBox: Box
-) extends AbstractGlobalReaction[T, P](environment, distribution):
+) extends AbstractGlobalReaction[T, P](environment, distribution)
+    with SchedulingCoordinator:
   private val randomness = new Random(learningInfo.randomSeed)
   private val redeployment = Redeployment(environment, environmentBox, learningInfo.randomSeed)
   private val snapshots = FinalEpisodeSnapshots(environment, learner, learningInfo, snapshotGroundTruth(_))

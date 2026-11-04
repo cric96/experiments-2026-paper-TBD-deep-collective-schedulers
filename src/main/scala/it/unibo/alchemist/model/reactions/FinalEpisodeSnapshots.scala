@@ -22,13 +22,16 @@ final class FinalEpisodeSnapshots[T, P <: Position[P]](
     learner: Learner,
     learningInfo: LearningInfo,
     groundTruth: Int => Double,
-    directory: File = DefaultDirectory
+    directory: File = DefaultDirectory,
+    episodeOverride: Option[Int] = None,
+    inspectEverySeed: Boolean = false,
+    observationTolerance: () => Double = () => 0.0
 ):
   private def targetBlock: Option[BuildingBlock] =
     nodes.headOption.flatMap(_.valueOf[Any](Sensors.program)).map(BuildingBlock.fromMolecule)
 
   private def recordedEpisode: Int =
-    if targetBlock.nonEmpty then GeneralizationEpisode else RecordedEpisode
+    episodeOverride.getOrElse(if targetBlock.nonEmpty then GeneralizationEpisode else RecordedEpisode)
 
   private def episodeStart: Double = (recordedEpisode * learningInfo.episodeSize).toDouble
 
@@ -40,7 +43,7 @@ final class FinalEpisodeSnapshots[T, P <: Position[P]](
 
   /** Called by the central agent at every step. */
   def observe(time: Double): Unit =
-    if learningInfo.randomSeed == InspectedRun then
+    if inspectEverySeed || learningInfo.randomSeed == InspectedRun then
       learner match
         case _: OfflineLearnerContinuous => observeNodes(time - episodeStart)
         case graphLearner: OfflineLearnerGNN => observeAttention(graphLearner, time - episodeStart)
@@ -53,7 +56,9 @@ final class FinalEpisodeSnapshots[T, P <: Position[P]](
 
   private def observeAttention(graphLearner: OfflineLearnerGNN, timeInEpisode: Double): Unit =
     val weight = weightOr(AttentionWeight)
-    val window = if targetBlock.contains(BuildingBlock.LeaderElection) then ElectionAttentionWindow else AttentionWindow
+    val window = if episodeOverride.nonEmpty || targetBlock.contains(BuildingBlock.LeaderElection) then
+      ElectionAttentionWindow
+    else AttentionWindow
     if isWeight(weight, AttentionWeight) && window.contains(timeInEpisode) then
       val positions = nodes.map(node => node.getId -> coordinatesOf(node)).toMap
       nodes.foreach { node =>
@@ -100,7 +105,14 @@ final class FinalEpisodeSnapshots[T, P <: Position[P]](
   /** The state the node's policy observed in its last round, if it has run at least once. */
   private def stateOf(node: Node[T]): Option[AgentState] =
     val outputs = node.valueOf[Queue[Snapshot]](Sensors.localComputationWindow).getOrElse(Queue.empty)
-    Option.when(outputs.nonEmpty)(AgentState(node.getId, outputs))
+    Option.when(outputs.nonEmpty)(
+      AgentState(
+        node.getId,
+        outputs,
+        observationTolerance(),
+        outputs.lastOption.flatMap(_.get(node.getId)).fold(0.0)(_.speed)
+      )
+    )
 end FinalEpisodeSnapshots
 
 object FinalEpisodeSnapshots:

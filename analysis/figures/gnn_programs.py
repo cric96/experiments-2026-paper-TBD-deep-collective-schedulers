@@ -20,6 +20,8 @@ from .gnn import ARROW_SHRINK, FILM_TIMES_S
 from .spatial import _draw_sources
 
 ELECTION_FILM_TIMES_S = (95.0, 103.0, 115.0, 150.0, 198.0)
+# The run shown in the titles: the paper's generalization snapshots (other campaigns pass their own).
+PAPER_RUN = "seed 2, episode 16"
 
 PROGRAM_FOLDERS = {"gradient": "gradient", "hop": "hopGradient", "broadcast": "broadcast", "collect": "collect", "leaderElection": "leaderElection"}
 
@@ -108,7 +110,7 @@ def _bar(fig, points, axes, label):
     bar.outline.set_visible(False)
 
 
-def gnn_program_attention_filmstrip(data: Dataset, out: Path) -> None:
+def gnn_program_attention_filmstrip(data: Dataset, out: Path, run: str = PAPER_RUN) -> None:
     """One row per program, shared embedding colours and attention arrows."""
     frames = load_program_embeddings(data)
     if not frames:
@@ -133,7 +135,7 @@ def gnn_program_attention_filmstrip(data: Dataset, out: Path) -> None:
                 ax.set_xlabel("$x$ (m)")
         axes[row, 0].set_ylabel(f"{config.PROGRAM_SHORT_LABELS[program]}\n$y$ (m)")
     _bar(fig, points, axes.ravel().tolist(), "Embedding PC1 (shared PCA)")
-    fig.suptitle("GNN: seed 2, episode 16, $\\beta=0.95$; source move / elected-leader failure at 100 s\n"
+    fig.suptitle(f"GNN: {run}, $\\beta=0.95$; source move / elected-leader failure at 100 s\n"
                  "arrows: most-attended neighbour; stars: source / initial boost; squares: leaders; crosses: failed node", fontsize=7)
     # savefig restores a None engine between formats; keep the manual layout active.
     with mpl.rc_context({"figure.constrained_layout.use": False}):
@@ -147,7 +149,7 @@ def _leader_id_colours(shown: pd.DataFrame):
     return identifiers, cmap, norm
 
 
-def gnn_program_response_filmstrips(data: Dataset, out: Path) -> None:
+def gnn_program_response_filmstrips(data: Dataset, out: Path, run: str = PAPER_RUN) -> None:
     """Output, chosen round rate, error, and embedding/attention for each program."""
     frames = load_program_embeddings(data)
     if not frames:
@@ -202,7 +204,7 @@ def gnn_program_response_filmstrips(data: Dataset, out: Path) -> None:
             event = f"elected leader removed at 100 s; grain {config.LEADER_ELECTION_GRAIN_M:g} m; crosses: failed node"
         else:
             event = "source moves at 100 s; stars: source"
-        fig.suptitle(f"{config.PROGRAM_LABELS[program]}: GNN, seed 2, episode 16, $\\beta=0.95$\n"
+        fig.suptitle(f"{config.PROGRAM_LABELS[program]}: GNN, {run}, $\\beta=0.95$\n"
                      f"{event}; arrows: most-attended neighbour", fontsize=7)
         with mpl.rc_context({"figure.constrained_layout.use": False}):
             style.save(fig, out, f"gnn_response_filmstrip_{program}")

@@ -1,0 +1,137 @@
+# Separate mobile-gradient experiment; no legacy exporter or reward is used.
+incarnation: scafi
+variables:
+  random: &random { min: 1, max: 4, step: 1, default: 2 }
+  weight: &weight { type: ArbitraryVariable, parameters: [0.95, [0.5, 0.8, 0.95, 0.99, 1.0]] }
+  algoId: { type: ArbitraryVariable, parameters: [0, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]] }
+  diffusion: { type: ArbitraryVariable, parameters: [1.0, [0.0, 0.25, 1.0, 4.0]] }
+  errorTolerance: { type: ArbitraryVariable, parameters: [5.0, [0.0, 5.0, 15.0, 30.0]] }
+  sourceChanges: { type: ArbitraryVariable, parameters: [1, [0, 1]] }
+  trainingEpisodes: { type: ArbitraryVariable, parameters: [10, [10]] }
+  episodes: { type: ArbitraryVariable, parameters: [20, [20]] }
+  episodeLength: { type: ArbitraryVariable, parameters: [200.0, [200.0]] }
+  movementInterval: &movementInterval { type: ArbitraryVariable, parameters: [0.25, [0.25]] }
+  movementRate: &movementRate { formula: "import it.unibo.scripting._; 1.0 / movementInterval.as[Double]", language: scala }
+  totalTime: &totalTime { formula: "import it.unibo.scripting._; episodes.as[Number].doubleValue() * episodeLength.as[Double] + movementInterval.as[Double] / 2.0", language: scala }
+  width: &width { type: ArbitraryVariable, parameters: [500.0, [500.0]] }
+  spacing: &spacing { type: ArbitraryVariable, parameters: [50.0, [50.0]] }
+  randomness: &randomness { type: ArbitraryVariable, parameters: [25.0, [25.0]] }
+  stepsPerEpisode: { type: ArbitraryVariable, parameters: [110, [110]] }
+  exportDirectory: { type: ArbitraryVariable, parameters: ["build/exports/mobility", ["build/exports/mobility"]] }
+  # Variants of the training and of the scenario; the defaults are the original mobile experiment.
+  completeReplay: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
+  costSignal: { type: ArbitraryVariable, parameters: ["Error", ["Error", "Staleness"]] }
+  lossScale: { type: ArbitraryVariable, parameters: [500.0, [500.0, 50.0]] }
+  mobilityModel: { type: ArbitraryVariable, parameters: ["Brownian", ["Brownian", "Waypoint"]] }
+  speed: { type: ArbitraryVariable, parameters: [1.0, [0.0, 1.0, 2.0]] }
+  warmStart: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
+  retention: &retention { type: ArbitraryVariable, parameters: [15.0, [15.0, 6.0]] }
+  ownSpeed: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
+  unexplainedChange: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
+  dependants: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
+  # What happens halfway through the evaluation episodes, and the cycle of the training ones (comma-separated).
+  episodeEvent: { type: ArbitraryVariable, parameters: ["SourceSwitch", ["SourceSwitch", "RegionStartsMoving", "SourceSwitchWhileRegionMoves"]] }
+  trainingEvents: { type: ArbitraryVariable, parameters: ["SourceSwitch", ["SourceSwitch", "SourceSwitch,RegionStartsMoving,RegionStartsMoving", "SourceSwitchWhileRegionMoves"]] }
+  movingShare: { type: ArbitraryVariable, parameters: [0.5, [0.5]] }
+  # How long (s) a region that starts moving halfway keeps moving; infinite: until the episode ends.
+  motionDuration: { type: ArbitraryVariable, parameters: [.inf, [.inf, 50.0]] }
+  neighbourSpeed: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
+  # Blank the base features that assume the gradient's semantics (residual, children, relative order).
+  programAgnostic: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
+  evaluationSeed: { type: ArbitraryVariable, parameters: [-1, [-1]] }
+  evaluationNodes: { type: ArbitraryVariable, parameters: [100, [100]] }
+  targetProgram: { type: ArbitraryVariable, parameters: [0, [0]] }
+  balanceScenarios: { type: ArbitraryVariable, parameters: [0, [0]] }
+  periodExploration: { type: ArbitraryVariable, parameters: ["Uniform", ["Uniform"]] }
+  mobileEncoding: { type: ArbitraryVariable, parameters: [1, [1]] }
+  trainingSpeeds: { type: ArbitraryVariable, parameters: ["0.0,1.0,2.0", ["0.0,1.0,2.0"]] }
+  finalMultiplier: { type: ArbitraryVariable, parameters: [0, [0]] }
+  config: &config
+    formula: |
+      import it.unibo.scripting._;
+      it.unibo.mobility.MobilityConfig(
+        seed = random.as[Number].intValue(), algorithm = algoId.as[Number].intValue(),
+        diffusion = diffusion.as[Double], tolerance = errorTolerance.as[Double], beta = weight.as[Double],
+        sourceChanges = sourceChanges.as[Number].intValue() != 0,
+        trainingEpisodes = trainingEpisodes.as[Number].intValue(), episodes = episodes.as[Number].intValue(),
+        episodeLength = episodeLength.as[Double], movementInterval = movementInterval.as[Double],
+        directory = new java.io.File(exportDirectory.as[String]),
+        costSignal = it.unibo.mobility.CostSignal.valueOf(costSignal.as[String]), lossScale = lossScale.as[Double],
+        model = it.unibo.mobility.MobilityModel.valueOf(mobilityModel.as[String]), speed = speed.as[Double],
+        warmStart = warmStart.as[Number].intValue() != 0,
+        event = it.unibo.mobility.EpisodeEvent.valueOf(episodeEvent.as[String]),
+        trainingEvents = trainingEvents.as[String].split(",").toSeq.map(it.unibo.mobility.EpisodeEvent.valueOf),
+        movingShare = movingShare.as[Double], motionDuration = motionDuration.as[Double],
+        evaluationSeed = Option(evaluationSeed.as[Number].intValue()).filter(_ >= 0),
+        evaluationNodes = evaluationNodes.as[Number].intValue(),
+        targetProgram = it.unibo.scafi.BuildingBlock.fromMolecule(targetProgram.as[Number]),
+        balanceScenarios = balanceScenarios.as[Number].intValue() != 0,
+        trainingSpeeds = trainingSpeeds.as[String].split(",").toSeq.map(_.toDouble)
+      )
+    language: scala
+  environmentBox: &environmentBox
+    formula: |
+      import it.unibo.scripting._;
+      it.unibo.learning.Box(width.as[Double], spacing.as[Double], randomness.as[Double])
+    language: scala
+  learner: &learner
+    formula: |
+      import it.unibo.learning.agents._;
+      import it.unibo.scripting._;
+      val seed = random.as[Number].doubleValue();
+      val beta = weight.as[Double];
+      val training = trainingEpisodes.as[Number].intValue();
+      val steps = stepsPerEpisode.as[Number].intValue();
+      val strata = if (balanceScenarios.as[Number].intValue() != 0) trainingEvents.as[String].split(",").distinct.length else 1;
+      val capacity = if (completeReplay.as[Number].intValue() != 0) Int.MaxValue else it.unibo.mobility.MobileObjective.ReplayCapacityPerRegime / strata;
+      val features = it.unibo.learning.encoding.MobileFeatures(ownSpeed.as[Number].intValue() != 0, unexplainedChange.as[Number].intValue() != 0, dependants.as[Number].intValue() != 0, neighbourSpeed.as[Number].intValue() != 0, programAgnostic.as[Number].intValue() != 0);
+      val exploration = it.unibo.learning.agents.offline.PeriodExploration.valueOf(periodExploration.as[String]);
+      val encoding = mobileEncoding.as[Number].intValue() != 0;
+      val multiplier = finalMultiplier.as[Number].intValue();
+      algoId.as[Number].intValue() match {
+        case 0 => new OfflineLearnerGNN(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, mobile = true, replayCapacity = capacity, mobileFeatures = features, periodExploration = exploration, mobileEncoding = encoding, finalTrainingMultiplier = (if (multiplier > 0) multiplier else 2))
+        case 1 => new OfflineLearnerContinuous(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, mobile = true, replayCapacity = capacity, mobileFeatures = features, periodExploration = exploration, mobileEncoding = encoding, finalTrainingMultiplier = (if (multiplier > 0) multiplier else 3))
+        case 2 => new HeuristicAdaptiveAgent(Seq(0.5, 1.0, 2.0, 3.0, 4.0, 5.0), beta)
+        case 8 => new OfflineLearnerContinuous(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, inspectionEnabled = false)
+        case 9 => new OfflineLearnerGNN(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps)
+        case 10 => new SameActionAgent(0.5)
+        case fixed => new SameActionAgent((fixed - 2).toDouble)
+      }
+    language: scala
+seeds:
+  scenario: *random
+  simulation: *random
+environment:
+  type: Continuous2DEnvironment
+  parameters: []
+  global-programs:
+    - type: MobileExperiment
+      time-distribution:
+        type: DiracComb
+        parameters: [0.0, *movementRate]
+      parameters: [*learner, *environmentBox, *config]
+network-model:
+  type: ConnectWithinDistance
+  parameters: [75]
+deployments:
+  type: Grid
+  parameters: [0, 0, *width, *width, *spacing, *spacing, *randomness, *randomness]
+  programs:
+    - - type: GenericReaction
+        time-distribution:
+          type: NextWakeUp
+          parameters: nextWakeUp
+        actions:
+          # The export of the previous round, sent at wake-up as in Alchemist 25 (replaces `- program: send`).
+          - type: SendPreviousExport
+          - type: RunScafiProgram
+            parameters: [it.unibo.scafi.Main, *retention]
+  contents:
+    - { molecule: nextWakeUp, concentration: 1.0 }
+    - { molecule: actions, concentration: 'List(1.0, 2.0, 3.0, 4.0, 5.0)' }
+    - { molecule: window, concentration: 20 }
+    - { molecule: source, concentration: false }
+    - { molecule: weight, concentration: *weight }
+terminate:
+  type: AfterTime
+  parameters: [*totalTime]

@@ -13,7 +13,7 @@ import pandas as pd
 
 from . import config
 from .data import METRICS, select
-from .methods import BETA_CONDITIONED, FIXED, LEARNED
+from .methods import BETA_CONDITIONED, FIXED, LEARNED, Method
 from .pareto import matched_error_saving, matched_ticks_gain
 from .stats import Interval, bootstrap_two_sample, compare, holm, relative_change, summarize
 
@@ -137,7 +137,7 @@ FRONTIER_GAINS = {
 }
 
 
-def frontier_gains(evaluation: pd.DataFrame) -> pd.DataFrame:
+def frontier_gains(evaluation: pd.DataFrame, methods: tuple[Method, ...] = LEARNED) -> pd.DataFrame:
     """Gains of every learned (method, beta) over the fixed-period schedules.
 
     * ``error_at_ticks`` / ``unstable_at_ticks``: relative reduction w.r.t. the
@@ -153,7 +153,7 @@ def frontier_gains(evaluation: pd.DataFrame) -> pd.DataFrame:
     baseline = fixed_runs(evaluation)
     fastest = baseline[np.isclose(baseline.period, config.FIXED_PERIODS_S[0])]
     rows = []
-    for method in LEARNED:
+    for method in methods:
         for weight in config.WEIGHTS:
             runs = select(evaluation, method.key, weight=weight)
             intervals = {

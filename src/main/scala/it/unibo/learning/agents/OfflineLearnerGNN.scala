@@ -4,11 +4,12 @@ import ai.djl.ndarray.index.NDIndex
 import ai.djl.ndarray.{NDArray, NDManager}
 import ai.djl.nn.Activation
 import it.unibo.learning.TradeOff
+import it.unibo.mobility.MobileObjective
 import it.unibo.learning.abstractions.{AgentState, Trajectory}
 import it.unibo.learning.agents.OfflineLearnerGNN.*
 import it.unibo.learning.agents.offline.BatchTensors.{column, rows}
 import it.unibo.learning.agents.offline.*
-import it.unibo.learning.encoding.StarGraph
+import it.unibo.learning.encoding.{MobileEncoding, MobileFeatures, StarGraph}
 import it.unibo.learning.network.{EdgeGATBlock, MinMaxActionScaler, TorchNetwork}
 import it.unibo.learning.network.NDArrayOps.*
 
@@ -28,13 +29,23 @@ final class OfflineLearnerGNN(
     batchSize: Int = 64,
     stepsPerEpisode: Int = 110,
     explorationEpisodes: Int = 10,
-    finalTrainingMultiplier: Int = 2
+    finalTrainingMultiplier: Int = 2,
+    mobile: Boolean = false,
+    replayCapacity: Int = MobileObjective.ReplayCapacityPerRegime,
+    mobileFeatures: MobileFeatures = MobileFeatures.None,
+    periodExploration: PeriodExploration = PeriodExploration.Uniform,
+    mobileEncoding: Boolean = true
 ) extends EpisodicOfflineLearner[GraphTransition](
       randomKey,
       weight,
       TrainingSchedule(explorationEpisodes, stepsPerEpisode, finalTrainingMultiplier),
-      batchSize
+      batchSize,
+      transitionCapacity = if mobile then replayCapacity else Int.MaxValue
     ):
+  private val selfDim: Int =
+    if mobile && mobileEncoding then MobileEncoding.selfDim(mobileFeatures) else StarGraph.SelfDim
+  private val neighDim: Int =
+    if mobile && mobileEncoding then MobileEncoding.neighDim(mobileFeatures) else StarGraph.NeighDim
   private val actionScaler: MinMaxActionScaler = MinMaxActionScaler(min, max)
   private val networkSeed: Int = LearnerSeeds.networks(randomKey, weight)
   private val actor: TorchNetwork[EdgeGATBlock] = actorNetwork("gat-actor", seedOffset = 101)
@@ -54,9 +65,9 @@ final class OfflineLearnerGNN(
   private def actorNetwork(name: String, seedOffset: Int): TorchNetwork[EdgeGATBlock] =
     TorchNetwork.createEdgeGAT(
       name,
-      StarGraph.SelfDim,
+      selfDim,
       StarGraph.MaxNeighbors,
-      StarGraph.NeighDim,
+      neighDim,
       edgeHidden,
       readoutHidden,
       outputSize = 1,
@@ -69,9 +80,9 @@ final class OfflineLearnerGNN(
   private def criticNetwork(name: String, seedOffset: Int): TorchNetwork[EdgeGATBlock] =
     TorchNetwork.createEdgeGAT(
       name,
-      StarGraph.SelfDim + 1,
+      selfDim + 1,
       StarGraph.MaxNeighbors,
-      StarGraph.NeighDim,
+      neighDim,
       edgeHidden,
       readoutHidden,
       outputSize = Objectives,
@@ -81,22 +92,27 @@ final class OfflineLearnerGNN(
 
   /** The actor's readout embedding of `state`, its attention over the neighbours, and the neighbours' ids. */
   def inspectEmbeddingAndAttention(state: AgentState, targetWeight: Double = weight): AttentionInspection =
-    val (embedding, attention) = fastEmbeddingAndAttention(StarGraph.encode(state, targetWeight, max))
+    val (embedding, attention) = fastEmbeddingAndAttention(encodeState(state, targetWeight))
     val neighbours = state.latestSnapshot.fold(List.empty[Int])(StarGraph.nearestNeighbours(state, _).map(_._1))
     AttentionInspection(embedding, attention, neighbours)
 
   override def policy: AgentState => Double = policyForWeight(weight)
 
   override def policyForWeight(customWeight: Double): AgentState => Double = state =>
-    if random.nextDouble() < schedule.epsilonAt(currentEpisode) then min + random.nextDouble() * (max - min)
-    else actionScaler.unscale(fastActor(StarGraph.encode(state, customWeight, max)).toDouble)
+    if random.nextDouble() < schedule.epsilonAt(currentEpisode) then
+      periodExploration.period(min, max, random.nextDouble())
+    else actionScaler.unscale(fastActor(encodeState(state, customWeight)).toDouble)
 
   override protected def record(trajectory: Trajectory): Unit =
     Relabelling
-      .relabel(trajectory, weight, gamma.toDouble, encodeForOwnWeight, StarGraph.BetaFeature)
+      .relabel(trajectory, weight, gamma.toDouble, encodeForOwnWeight, StarGraph.BetaFeature, mobile)
       .foreach(relabelled => transitions.add(toTransition(relabelled), relabelled.isUnstable))
 
-  private def encodeForOwnWeight(state: AgentState): Array[Float] = StarGraph.encode(state, weight, max)
+  private def encodeState(state: AgentState, beta: Double): Array[Float] =
+    if mobile && mobileEncoding then MobileEncoding.graph(state, beta, max, mobileFeatures)
+    else StarGraph.encode(state, beta, max)
+
+  private def encodeForOwnWeight(state: AgentState): Array[Float] = encodeState(state, weight)
 
   private def toTransition(relabelled: RelabelledStep): GraphTransition =
     val period = relabelled.step.action
@@ -105,13 +121,14 @@ final class OfflineLearnerGNN(
     GraphTransition(
       state = relabelled.state,
       scaledAction = actionScaler.scale(period),
-      convergenceReward = (-(u * u)).toFloat,
-      energyReward = (-((1.0 - u) * (1.0 - u))).toFloat,
-      convergenceWeight = weights.convergence.toFloat,
-      energyWeight = weights.energy.toFloat,
+      convergenceReward = relabelled.errorIntegral.fold(-(u * u))(-_).toFloat,
+      energyReward = (if mobile then -relabelled.energyCost else -((1.0 - u) * (1.0 - u))).toFloat,
+      convergenceWeight = (if mobile then relabelled.beta else weights.convergence).toFloat,
+      energyWeight = (if mobile then 1.0 - relabelled.beta else weights.energy).toFloat,
       nextState = relabelled.nextState,
       terminal = relabelled.terminalFlag,
-      discountFactor = relabelled.discount
+      discountFactor = relabelled.discount,
+      deferredBeta = relabelled.deferredBeta
     )
 
   override protected def trainOn(batch: Vector[GraphTransition], manager: NDManager): Unit =
@@ -145,8 +162,8 @@ final class OfflineLearnerGNN(
 
   /** Inserts the (B × 1) actions right after the ego features of the (B × TotalDim) star-graph states. */
   private def withAction(states: NDArray, actions: NDArray): NDArray =
-    val ego = states.get(new NDIndex(":, :{}", java.lang.Long.valueOf(StarGraph.SelfDim.toLong)))
-    val neighbours = states.get(new NDIndex(":, {}:", java.lang.Long.valueOf(StarGraph.SelfDim.toLong)))
+    val ego = states.get(new NDIndex(":, :{}", java.lang.Long.valueOf(selfDim.toLong)))
+    val neighbours = states.get(new NDIndex(":, {}:", java.lang.Long.valueOf(selfDim.toLong)))
     ego.concat(actions, 1).concat(neighbours, 1)
 
   override protected def onTrained(): Unit =
@@ -174,8 +191,11 @@ object OfflineLearnerGNN:
       energyWeight: Float,
       nextState: Array[Float],
       terminal: Float,
-      discountFactor: Float
-  )
+      discountFactor: Float,
+      deferredBeta: Option[DeferredBeta] = None
+  ):
+    def conditionedState: Array[Float] = DeferredBeta.conditioned(state, deferredBeta)
+    def conditionedNextState: Array[Float] = DeferredBeta.conditioned(nextState, deferredBeta)
 
   /** A batch of graph transitions as tensors: rewards and objective weights have one column per objective. */
   final private case class GraphBatch(
@@ -191,8 +211,8 @@ object OfflineLearnerGNN:
   private object GraphBatch:
     def apply(batch: Vector[GraphTransition], manager: NDManager): GraphBatch =
       GraphBatch(
-        states = rows(batch.map(_.state), manager),
-        nextStates = rows(batch.map(_.nextState), manager),
+        states = rows(batch.map(_.conditionedState), manager),
+        nextStates = rows(batch.map(_.conditionedNextState), manager),
         actions = column(batch.map(_.scaledAction), manager),
         rewards = rows(batch.map(transition => Array(transition.convergenceReward, transition.energyReward)), manager),
         objectiveWeights =

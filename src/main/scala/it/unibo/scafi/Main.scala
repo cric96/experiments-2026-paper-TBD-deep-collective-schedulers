@@ -1,6 +1,5 @@
 package it.unibo.scafi
 
-import it.unibo.alchemist.model.reactions.CentralAgent
 import it.unibo.alchemist.model.scafi.ScafiIncarnationForAlchemist.*
 import it.unibo.learning.TradeOff
 import it.unibo.learning.abstractions.AgentState.{NeighborInfo, Snapshot}
@@ -30,11 +29,12 @@ class Main
   private lazy val weight: Double = node.getOption[Double](Sensors.weight).getOrElse(DefaultWeight)
   private lazy val targetBlock: BuildingBlock =
     node.getOption[Any](Sensors.program).fold[BuildingBlock](BuildingBlock.Gradient)(BuildingBlock.fromMolecule)
-  private lazy val centralAgent: CentralAgent[?, ?] = alchemistEnvironment.getReactions.getCurrent.asScala
-    .collectFirst { case agent: CentralAgent[?, ?] => agent }
-    .getOrElse(throw new IllegalStateException("The simulation must include a CentralAgent global reaction"))
+  private lazy val centralAgent: SchedulingCoordinator = alchemistEnvironment.getReactions.getCurrent.asScala
+    .collectFirst { case agent: SchedulingCoordinator => agent }
+    .getOrElse(throw new IllegalStateException("The simulation must include a scheduling coordinator"))
 
   override def main(): Any =
+    centralAgent.beforeRound(alchemistTimestamp.toDouble)
     val output = blockOutput()
     node.put(Sensors.localComputation, output)
     decide(output)
@@ -85,17 +85,22 @@ class Main
   private def collect(isSource: Boolean): Double =
     C[Double, Double](classicGradient(isSource), _ + _, local = 1.0, Null = 0.0)
 
+  /** The node's speed from odometry (m/s), written by the mobile experiment; zero when nothing moves the node. */
+  private def ownSpeed: Double = node.getOption[Double](Sensors.speed).getOrElse(0.0)
+
   /** Chooses the next wake-up period, and logs the transition from the previous decision to the current state. */
   private def decide(output: Double): Unit =
     rep(Option.empty[Decision]) { previous =>
-      val state = AgentState(mid(), window(observe(output, previous)))
+      val state = AgentState(mid(), window(observe(output, previous)), centralAgent.tolerance, ownSpeed)
       val reward = previous.fold(0.0)(decision => rewardOf(decision.state))
       val period = centralAgent.policy(state)
-      previous.foreach { decision =>
+      previous.filter(_ => !centralAgent.mobile).foreach { decision =>
         centralAgent.memory.put(decision.state, indexOf(decision.period), decision.period, reward, state)
       }
-      recordProgress(output, reward)
-      recordExperience(previous, reward)
+      if centralAgent.mobile then centralAgent.decision(state, period, alchemistTimestamp.toDouble)
+      else
+        recordProgress(output, reward)
+        recordExperience(previous, reward)
       node.put(Sensors.localComputationWindow, state.neighborhoodOutput)
       node.put(Sensors.ticks, roundCounter())
       node.put(Sensors.nextWakeUp, period)
@@ -105,7 +110,15 @@ class Main
   /** The outputs, distances and last periods of the node and of its neighbours. */
   private def observe(output: Double, previous: Option[Decision]): Snapshot =
     includingSelf.reifyField {
-      NeighborInfo(nbr(output), nbrRange(), nbr(previous.map(_.period)).getOrElse(UndecidedPeriod))
+      if centralAgent.mobile then
+        NeighborInfo(
+          nbr(output),
+          nbrRange(),
+          nbr(previous.map(_.period)).getOrElse(UndecidedPeriod),
+          nbr(alchemistTimestamp.toDouble),
+          nbr(ownSpeed)
+        )
+      else NeighborInfo(nbr(output), nbrRange(), nbr(previous.map(_.period)).getOrElse(UndecidedPeriod))
     }
 
   /** The last `windowSize` snapshots, oldest first. */

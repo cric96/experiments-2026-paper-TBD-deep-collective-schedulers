@@ -22,6 +22,9 @@ trait Learner:
   /** Called at the end of every episode with the trajectory of each node. */
   def endEpisode(trajectories: Seq[Trajectory]): Unit = ()
 
+  /** Training-only replay stratum supplied by the experiment, never an actor input. */
+  def trainingScenario(scenario: Int): Unit = ()
+
   /** Lets the simulation provide its seeded source of randomness. */
   def injectRandom(random: Random): Unit = ()
 

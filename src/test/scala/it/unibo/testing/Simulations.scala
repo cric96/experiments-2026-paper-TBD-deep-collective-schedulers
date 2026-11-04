@@ -28,9 +28,21 @@ object Simulations:
 
   /** The simulation described by `src/main/yaml/<yaml>.yml` with `variables`, without its exporters. */
   def load(yaml: String, variables: Map[String, Any]): Simulation[Any, Nothing] =
-    val simulation = LoadAlchemist.from(new File(s"src/main/yaml/$yaml.yml")).getWith[Any, Nothing](variables.asJava)
+    loadFile(new File(s"src/main/yaml/$yaml.yml"), variables)
+
+  /** The simulation described by `file` with `variables`, without its exporters. */
+  def loadFile(file: File, variables: Map[String, Any] = Map.empty): Simulation[Any, Nothing] =
+    val simulation = LoadAlchemist.from(file).getWith[Any, Nothing](variables.asJava)
     simulation.getOutputMonitors.asScala.toList.foreach(simulation.removeOutputMonitor)
     simulation
+
+  /** Runs `simulation` until `time` and returns its environment. */
+  def runUntil[P <: Position[P]](simulation: Simulation[Any, P], time: Double): Environment[Any, P] =
+    simulation.getEnvironment.addTerminator(new AfterTime[Any, P](new DoubleTime(time)))
+    simulation.play()
+    simulation.run()
+    Option(simulation.getError.getOrNull()).foreach(error => throw error)
+    simulation.getEnvironment
 
   /** Runs `src/main/yaml/<yaml>.yml` and returns a fingerprint of the nodes as soon as each checkpoint is passed. */
   def run(yaml: String, variables: Map[String, Any], checkpoints: Seq[Double]): Seq[Fingerprint] =
@@ -38,15 +50,12 @@ object Simulations:
 
   private def simulate[P <: Position[P]](simulation: Simulation[Any, P], checkpoints: Seq[Double]): Seq[Fingerprint] =
     val fingerprints = ListBuffer.empty[Fingerprint]
-    simulation.getEnvironment.addTerminator(new AfterTime[Any, P](new DoubleTime(checkpoints.max)))
     simulation.addOutputMonitor(new OutputMonitor[Any, P]:
       override def stepDone(environment: Environment[Any, P], reaction: Reaction[Any], time: Time, step: Long): Unit =
         checkpoints.drop(fingerprints.size).headOption.filter(_ <= time.toDouble).foreach { checkpoint =>
           fingerprints += fingerprintOf(environment, checkpoint)
         })
-    simulation.play()
-    simulation.run()
-    Option(simulation.getError.getOrNull()).foreach(error => throw error)
+    runUntil(simulation, checkpoints.max)
     fingerprints.toList
 
   private def fingerprintOf(environment: Environment[Any, ?], time: Double): Fingerprint =

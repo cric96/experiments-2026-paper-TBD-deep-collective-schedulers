@@ -19,3 +19,4 @@ object Sensors:
   val electedLeader = "electedLeader"
   val experiences = "experiences"
   val accumulatedUnstableTime = "accumulatedUnstableTime"
+  val speed = "speed"

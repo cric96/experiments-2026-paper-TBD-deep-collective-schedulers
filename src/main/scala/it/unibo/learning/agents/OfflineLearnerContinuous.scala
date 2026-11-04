@@ -7,7 +7,8 @@ import it.unibo.learning.abstractions.{AgentState, Trajectory}
 import it.unibo.learning.agents.OfflineLearnerContinuous.*
 import it.unibo.learning.agents.offline.BatchTensors.{column, rows}
 import it.unibo.learning.agents.offline.*
-import it.unibo.learning.encoding.SpatialTemporal
+import it.unibo.learning.encoding.{MobileEncoding, MobileFeatures, SpatialTemporal}
+import it.unibo.mobility.MobileObjective
 import it.unibo.learning.network.{MinMaxActionScaler, TorchNetwork}
 import it.unibo.learning.network.NDArrayOps.*
 
@@ -30,13 +31,21 @@ final class OfflineLearnerContinuous(
     stepsPerEpisode: Int = 160,
     explorationEpisodes: Int = 10,
     finalTrainingMultiplier: Int = 3,
-    inspectionDirectory: File = ActorInspection.DefaultDirectory
+    inspectionDirectory: File = ActorInspection.DefaultDirectory,
+    mobile: Boolean = false,
+    inspectionEnabled: Boolean = true,
+    replayCapacity: Int = MobileObjective.ReplayCapacityPerRegime,
+    mobileFeatures: MobileFeatures = MobileFeatures.None,
+    periodExploration: PeriodExploration = PeriodExploration.Uniform,
+    mobileEncoding: Boolean = true
 ) extends EpisodicOfflineLearner[ContinuousTransition](
       randomKey,
       weight,
       TrainingSchedule(explorationEpisodes, stepsPerEpisode, finalTrainingMultiplier),
-      batchSize
+      batchSize,
+      transitionCapacity = if mobile then replayCapacity else Int.MaxValue
     ):
+  private val inputDim: Int = if mobile && mobileEncoding then MobileEncoding.featureDim(mobileFeatures) else stateDim
   private val actionScaler: MinMaxActionScaler = MinMaxActionScaler(min, max)
   private val networkSeed: Int = LearnerSeeds.networks(randomKey, weight)
   private val actor: TorchNetwork[SequentialBlock] = actorNetwork("actor", seedOffset = 1)
@@ -54,7 +63,7 @@ final class OfflineLearnerContinuous(
   private def actorNetwork(name: String, seedOffset: Int): TorchNetwork[SequentialBlock] =
     TorchNetwork.createMLP(
       name,
-      stateDim,
+      inputDim,
       Seq(hiddenSize, hiddenSize),
       outputSize = 1,
       Some(Activation.tanhBlock()),
@@ -64,30 +73,40 @@ final class OfflineLearnerContinuous(
 
   /** A critic takes the state followed by the scaled action. */
   private def criticNetwork(name: String, seedOffset: Int): TorchNetwork[SequentialBlock] =
-    TorchNetwork.createMLP(name, stateDim + 1, Seq(hiddenSize, hiddenSize), 1, lr = lr, seed = networkSeed + seedOffset)
+    TorchNetwork.createMLP(name, inputDim + 1, Seq(hiddenSize, hiddenSize), 1, lr = lr, seed = networkSeed + seedOffset)
 
   override def policy: AgentState => Double = policyForWeight(weight)
 
   override def policyForWeight(customWeight: Double): AgentState => Double = state =>
-    if random.nextDouble() < schedule.epsilonAt(currentEpisode) then min + random.nextDouble() * (max - min)
-    else actionScaler.unscale(fastActor(SpatialTemporal.encode(state, customWeight, max))(0).toDouble)
+    if random.nextDouble() < schedule.epsilonAt(currentEpisode) then
+      periodExploration.period(min, max, random.nextDouble())
+    else actionScaler.unscale(fastActor(encodeState(state, customWeight))(0).toDouble)
 
   override protected def record(trajectory: Trajectory): Unit =
     Relabelling
-      .relabel(trajectory, weight, gamma.toDouble, encodeForOwnWeight, SpatialTemporal.Feature.Beta)
+      .relabel(trajectory, weight, gamma.toDouble, encodeForOwnWeight, SpatialTemporal.Feature.Beta, mobile)
       .foreach(relabelled => transitions.add(toTransition(relabelled), relabelled.isUnstable))
 
-  private def encodeForOwnWeight(state: AgentState): Array[Float] = SpatialTemporal.encode(state, weight, max)
+  private def encodeState(state: AgentState, beta: Double): Array[Float] =
+    if mobile && mobileEncoding then MobileEncoding.spatial(state, beta, max, mobileFeatures)
+    else SpatialTemporal.encode(state, beta, max)
+
+  private def encodeForOwnWeight(state: AgentState): Array[Float] = encodeState(state, weight)
 
   private def toTransition(relabelled: RelabelledStep): ContinuousTransition =
     val period = relabelled.step.action
     ContinuousTransition(
       state = relabelled.state,
       scaledAction = actionScaler.scale(period),
-      reward = TradeOff.offlineReward(relabelled.intensity, period, relabelled.beta, min, max).toFloat,
+      reward = relabelled.errorIntegral
+        .fold(TradeOff.offlineReward(relabelled.intensity, period, relabelled.beta, min, max))(cost =>
+          MobileObjective.reward(cost, relabelled.energyCost, relabelled.beta)
+        )
+        .toFloat,
       nextState = relabelled.nextState,
       terminal = relabelled.terminalFlag,
-      discountFactor = relabelled.discount
+      discountFactor = relabelled.discount,
+      deferredBeta = relabelled.deferredBeta
     )
 
   override protected def trainOn(batch: Vector[ContinuousTransition], manager: NDManager): Unit =
@@ -120,7 +139,10 @@ final class OfflineLearnerContinuous(
 
   override protected def onTrained(): Unit =
     fastActor = actor.snapshotFastMLP(useTanh = true)
-    if schedule.isLastTraining(currentEpisode) && math.abs(randomKey - InspectedRun) < RunTolerance then
+    if inspectionEnabled && !mobile && schedule.isLastTraining(currentEpisode) && math.abs(
+        randomKey - InspectedRun
+      ) < RunTolerance
+    then
       ActorInspection(actor, critic1, actionScaler, stateDim, inspectionDirectory)
         .save(transitions.oldest(ActorInspection.SamplesPerRegime).map(_.state), weight)
 end OfflineLearnerContinuous
@@ -140,8 +162,11 @@ object OfflineLearnerContinuous:
       reward: Float,
       nextState: Array[Float],
       terminal: Float,
-      discountFactor: Float
-  )
+      discountFactor: Float,
+      deferredBeta: Option[DeferredBeta] = None
+  ):
+    def conditionedState: Array[Float] = DeferredBeta.conditioned(state, deferredBeta)
+    def conditionedNextState: Array[Float] = DeferredBeta.conditioned(nextState, deferredBeta)
 
   /** A batch of continuous transitions as tensors; the scalar fields are columns. */
   final private case class ContinuousBatch(
@@ -156,8 +181,8 @@ object OfflineLearnerContinuous:
   private object ContinuousBatch:
     def apply(batch: Vector[ContinuousTransition], manager: NDManager): ContinuousBatch =
       ContinuousBatch(
-        states = rows(batch.map(_.state), manager),
-        nextStates = rows(batch.map(_.nextState), manager),
+        states = rows(batch.map(_.conditionedState), manager),
+        nextStates = rows(batch.map(_.conditionedNextState), manager),
         actions = column(batch.map(_.scaledAction), manager),
         rewards = column(batch.map(_.reward), manager),
         terminals = column(batch.map(_.terminal), manager),

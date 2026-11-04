@@ -11,6 +11,7 @@ import pandas as pd
 from . import results
 from .data import episode_table, evaluation_summary, final_episode_traces, generalization_table
 from .io import load_runs
+from .methods import LEARNED, Method
 
 # Sub-folders of the exports directory.
 EPISODE_DIR = "simulation/episode"  # one row per episode, every method
@@ -29,6 +30,7 @@ class Dataset:
     evaluation: pd.DataFrame  # main experiment, one row per run (mean of evaluation episodes)
     traces: pd.DataFrame  # main experiment, final-episode 2 s traces
     generalization: pd.DataFrame  # generalization experiment, one row per (run, episode)
+    methods: tuple[Method, ...] = LEARNED  # the learned methods compared with the fixed periods
 
     @property
     def embeddings_dir(self) -> Path:
@@ -41,7 +43,7 @@ class Dataset:
     # Derived results (bootstrap-heavy ones are computed lazily, once).
     @cached_property
     def gains(self) -> pd.DataFrame:
-        return results.frontier_gains(self.evaluation)
+        return results.frontier_gains(self.evaluation, self.methods)
 
     @cached_property
     def significance(self) -> pd.DataFrame:

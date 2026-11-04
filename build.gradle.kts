@@ -111,6 +111,26 @@ File(rootProject.rootDir.path + "/src/main/yaml").listFiles()
                     )
                 }
             }
+            if (name == "simulationMobility") {
+                systemProperty("ai.djl.pytorch.num_threads", "1")
+                systemProperty("ai.djl.pytorch.num_interop_threads", "1")
+                environment("OMP_NUM_THREADS", "1")
+                environment("MKL_NUM_THREADS", "1")
+                val overrides = mapOf(
+                    "mobilityDiffusion" to "diffusion", "mobilityTolerance" to "errorTolerance",
+                    "mobilityAlgorithm" to "algoId", "mobilitySources" to "sourceChanges",
+                    "mobilityTrainingEpisodes" to "trainingEpisodes", "mobilityEpisodes" to "episodes",
+                    "mobilityEpisodeLength" to "episodeLength", "mobilitySteps" to "stepsPerEpisode",
+                    "mobilityInterval" to "movementInterval",
+                )
+                overrides.forEach { (property, variable) ->
+                    providers.gradleProperty(property).orNull?.let { raw ->
+                        val value = raw.toDouble()
+                        require(value.isFinite() && value >= 0) { "$property must be finite and non-negative" }
+                        args("--override", "variables: {$variable: {type: ArbitraryVariable, parameters: [$value, [$value]]}}")
+                    }
+                }
+            }
             if (System.getenv("CI") == "true" || batch == "true") {
                 // Headless: run the cartesian product of the swept variables (the default values of the others).
                 val swept = sweptVariablesOf(simulationFile).joinToString(", ")
@@ -130,4 +150,19 @@ tasks.withType<Tar>().configureEach {
 }
 tasks.withType<Zip>().configureEach {
     duplicatesStrategy = DuplicatesStrategy.WARN
+}
+// Portable runtime description for the isolated campaign runner; no old build-script dependency.
+tasks.register("campaignRuntime") {
+    dependsOn("classes")
+    doLast {
+        val launcher = javaToolchains.launcherFor {
+            languageVersion.set(JavaLanguageVersion.of(17))
+        }.get()
+        val runtime = mapOf(
+            "java" to launcher.executablePath.asFile.absolutePath,
+            "classpath" to sourceSets["main"].runtimeClasspath.asPath,
+        )
+        layout.buildDirectory.file("campaign-runtime.json").get().asFile
+            .writeText(groovy.json.JsonOutput.toJson(runtime))
+    }
 }

@@ -1,0 +1,35 @@
+incarnation: scafi
+
+# The nodes of previousExportTiming.yml with the `send` program of the ScaFi incarnation, which in Alchemist 45 sends
+# every export as soon as the round completes.
+_constants:
+  retentionTime: &retentionTime 10
+  range: &range 10
+
+network-model:
+  type: ConnectWithinDistance
+  parameters: [*range]
+
+deployments:
+  - type: Point
+    parameters: [0, 0]
+    programs:
+      - - time-distribution:
+            type: DiracComb
+            parameters: [1.0, 1.0]
+          type: GenericReaction
+          actions:
+            - type: RunScafiProgram
+              parameters: [it.unibo.testing.NeighbourRound, *retentionTime]
+        - program: send
+  - type: Point
+    parameters: [5, 0]
+    programs:
+      - - time-distribution:
+            type: DiracComb
+            parameters: [1.5, 1.0]
+          type: GenericReaction
+          actions:
+            - type: RunScafiProgram
+              parameters: [it.unibo.testing.NeighbourRound, *retentionTime]
+        - program: send

@@ -1,7 +1,7 @@
 package it.unibo.learning.agents.offline
 
 import it.unibo.learning.TradeOff
-import it.unibo.learning.abstractions.{AgentState, Step}
+import it.unibo.learning.abstractions.{AgentState, MobileOutcome, Step}
 import it.unibo.learning.encoding.InstabilityIntensity
 import it.unibo.testing.AgentStates.*
 import org.scalatest.flatspec.AnyFlatSpec
@@ -54,5 +54,21 @@ class RelabellingSpec extends AnyFlatSpec with Matchers:
   it should "attach the instability intensity of the step" in {
     relabelled.grouped(weightsPerStep).map(_.head.intensity).toSeq shouldBe
       trajectory.map(step => InstabilityIntensity.of(step.state))
+  }
+
+  "Mobile relabelling" should "share the features of a step across the target weights and condition them on demand" in {
+    val costs = Map(0.0 -> 0.3, 5.0 -> 0.1)
+    val outcome = MobileOutcome(2.0, costs, stableBackbone, terminal = false)
+    val step = Step(sourceMovingTowardsMe, actionIndex = -1, action = 2.0, reward = 0.0, Some(outcome))
+    val mobile = Relabelling.relabel(Seq(step), ownWeight, gamma, encode, betaIndex, mobile = true)
+    mobile should have size (costs.size * weightsPerStep).toLong
+    mobile.groupBy(_.errorIntegral).values.foreach { copies =>
+      copies.map(_.state).distinct should have size 1
+      copies.map(_.nextState).distinct should have size 1
+    }
+    mobile.foreach { copy =>
+      copy.conditionedState.toSeq shouldBe Seq(sourceMovingTowardsMe.me.toFloat, copy.beta.toFloat)
+      copy.conditionedNextState.toSeq shouldBe Seq(stableBackbone.me.toFloat, copy.beta.toFloat)
+    }
   }
 end RelabellingSpec
