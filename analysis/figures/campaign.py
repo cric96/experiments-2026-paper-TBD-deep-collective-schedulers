@@ -39,6 +39,13 @@ VARIANT_LABELS = {
     "legacy-paper-steps": "Legacy, 110 steps per episode",
     "legacy-static-training": "Legacy, source switches only",
     "legacy-paper-training": "Legacy, paper training",
+    "legacy-quiet": "Legacy, quiet steady state",
+    "legacy-graded": "Legacy, graded reaction",
+    "legacy-quiet-awaiting": "Legacy, quiet, awaits values",
+    "legacy-graded-awaiting": "Legacy, graded, awaits values",
+    "legacy-linear-awaiting": "Legacy, linear β, awaits values",
+    "legacy-linear-patient": "Legacy, linear β, waits quietly",
+    "legacy-full-range": "Legacy, β over the whole range, awaits values",
 }
 PROGRAMS = {0: "Gradient", 1: "Hop count", 2: "Broadcast", 3: "Collect", 4: "Election"}
 PHASES = {"bootstrap": "Start-up\n0–40 s", "quiet": "Stable\n40–100 s", "event": "Event\n100–150 s",
@@ -126,12 +133,20 @@ def pareto_panel(ax, episodes: pd.DataFrame, where: tuple, finals: dict[int, str
     ax.set(xlabel=ROUNDS_LABEL, ylabel=ERROR_LABEL)
 
 
+def compared_series(finals: dict[int, str]) -> list[tuple[str, str, int, methods.Method, str]]:
+    """(role, variant, algorithm, method, label) of every compared series: the variants of each architecture, then the
+    reactive baselines (drawn like a final method)."""
+    learned = [(role, variant, algorithm, ARCHITECTURES[algorithm],
+                f"{ARCHITECTURE_LABELS[algorithm]}, {VARIANT_LABELS[variant].lower()}")
+               for algorithm in LEARNED for role, variant in roles(finals[algorithm]).items()]
+    return learned + [("final", "fixed", algorithm, method, method.short) for algorithm, method in BASELINE_METHODS.items()]
+
+
 def phase_gains_panel(ax, gains: pd.DataFrame, where: tuple, finals: dict[int, str]) -> None:
     """Error reduction w.r.t. the fixed-period frontier at matched rounds, per phase of the episode."""
-    series = [(role, variant, algorithm) for algorithm in LEARNED for role, variant in roles(finals[algorithm]).items()]
+    series = compared_series(finals)
     width = 0.8 / len(series)
-    for index, (role, variant, algorithm) in enumerate(series):
-        method = ARCHITECTURES[algorithm]
+    for index, (role, variant, algorithm, method, label) in enumerate(series):
         points = [estimate(select(scenario(gains, *where, phase=phase), variant, algorithm), "gain")
                   for phase in CHANGING_PHASES]
         positions = np.arange(len(CHANGING_PHASES)) + (index - (len(series) - 1) / 2) * width
@@ -140,8 +155,7 @@ def phase_gains_panel(ax, gains: pd.DataFrame, where: tuple, finals: dict[int, s
                            else [np.nan, np.nan] for p in points]).T
         face = {"final": method.color, "current": "white", "legacy": to_rgba(method.color, VARIANT_ALPHA[role])}[role]
         ax.bar(positions, means, width, color=face, edgecolor=method.color,
-               hatch="////" if role == "legacy" else None, linewidth=0.6,
-               label=f"{ARCHITECTURE_LABELS[algorithm]}, {VARIANT_LABELS[variant].lower()}")
+               hatch="////" if role == "legacy" else None, linewidth=0.6, label=label)
         ax.errorbar(positions, means, yerr=errors, linestyle="none", color=style.INK, elinewidth=0.6)
     ax.axhline(0, color=style.INK_MUTED, linewidth=0.6)
     ax.set_xticks(range(len(CHANGING_PHASES)), [PHASES[phase] for phase in CHANGING_PHASES])
@@ -152,15 +166,14 @@ def phase_rounds_panel(ax, episodes: pd.DataFrame, where: tuple, finals: dict[in
     """Rounds per node per second in every phase; the longest fixed period is the cheapest error-free schedule of a
     converged network."""
     positions = np.arange(len(PHASES))
-    for algorithm in LEARNED:
-        for role, variant in roles(finals[algorithm]).items():
-            points = [estimate(select(scenario(episodes, *where, phase=phase), variant, algorithm),
-                               "roundsPerNodeSecond") for phase in PHASES]
-            if all(np.isfinite(point["mean"]) for point in points):
-                ax.errorbar(positions, [point["mean"] for point in points],
-                            yerr=np.array([whiskers(point) or [[np.nan], [np.nan]] for point in points])[:, :, 0].T,
-                            linewidth=0.8, elinewidth=0.6, **variant_style(
-                                ARCHITECTURES[algorithm], role, linestyle=VARIANT_LINE[role], label=None))
+    for role, variant, algorithm, method, _ in compared_series(finals):
+        points = [estimate(select(scenario(episodes, *where, phase=phase), variant, algorithm),
+                           "roundsPerNodeSecond") for phase in PHASES]
+        if all(np.isfinite(point["mean"]) for point in points):
+            ax.errorbar(positions, [point["mean"] for point in points],
+                        yerr=np.array([whiskers(point) or [[np.nan], [np.nan]] for point in points])[:, :, 0].T,
+                        linewidth=0.8, elinewidth=0.6,
+                        **variant_style(method, role, linestyle=VARIANT_LINE[role], label=None))
     longest_fixed_line(ax, scenario(episodes, *where))
     ax.set_xticks(positions, list(PHASES.values()))
     ax.set_ylabel(ROUNDS_LABEL)
@@ -176,8 +189,9 @@ def longest_fixed_line(ax, rows: pd.DataFrame) -> None:
 
 
 def roles(final: str) -> dict[str, str]:
-    """The compared variants: the final method, the current control (when different) and the legacy control."""
-    return {"final": final, **({"current": "current"} if final != "current" else {}), "legacy": "legacy"}
+    """The compared variants: the final method and, when different from it, the current and the legacy controls."""
+    controls = {role: variant for role, variant in (("current", "current"), ("legacy", "legacy")) if variant != final}
+    return {"final": final, **controls}
 
 
 def family_figure(episodes, gains, out: Path, name: str, scenarios: list[tuple], titles: list[str],
@@ -197,8 +211,11 @@ def family_figure(episodes, gains, out: Path, name: str, scenarios: list[tuple],
 SIZES = (50, 100, 200)
 
 
-def gain_grid(gains: pd.DataFrame, variant: str, algorithm: int) -> tuple[np.ndarray, list[tuple[int, int, str]]]:
-    """Gain (%) of a method for every program (rows) and population (columns), with the text of every cell."""
+def gain_grid(gains: pd.DataFrame, variant: str, algorithm: int,
+              interval: bool = True) -> tuple[np.ndarray, list[tuple[int, int, str]]]:
+    """Gain (%) of a method for every program (rows) and population (columns), with the text of every cell; a star
+    marks a 95% interval that includes 0 or cannot be computed, unless the method has no `interval` (a schedule run
+    once per topology)."""
     table = np.full((len(PROGRAMS), len(SIZES)), np.nan)
     cells = []
     for (row, program), (column, nodes) in [(p, s) for p in enumerate(PROGRAMS) for s in enumerate(SIZES)]:
@@ -207,20 +224,29 @@ def gain_grid(gains: pd.DataFrame, variant: str, algorithm: int) -> tuple[np.nda
         if not rows.empty:
             point = estimate(rows, "gain")
             table[row, column] = 100 * point["mean"]
-            uncertain = not point["complete"] or point["low"] <= 0 <= point["high"]
+            uncertain = interval and (not point["complete"] or point["low"] <= 0 <= point["high"])
             cells.append((row, column, f"{table[row, column]:.0f}" + ("*" if uncertain else "")))
     return table, cells
 
 
+def zero_shot_panels(finals: dict[int, str]) -> list[tuple[str, int, str, bool]]:
+    """(variant, algorithm, title, interval) of the final learned methods, then of the reactive baselines (run once
+    per topology, under the first training seed: no interval over the training seeds)."""
+    panels = [(final, algorithm, f"{ARCHITECTURE_LABELS[algorithm]}, {VARIANT_LABELS[final].lower()}", True)
+              for algorithm, final in ((algorithm, finals[algorithm]) for algorithm in LEARNED)]
+    return panels + [("fixed", algorithm, f"{method.label}, one run per topology", False)
+                     for algorithm, method in BASELINE_METHODS.items()]
+
+
 def generalization_figure(gains: pd.DataFrame, out: Path, finals: dict[int, str]) -> None:
-    """Gain at matched rounds for every program and population, final method (static gradient at 100 nodes), on one
-    colour scale shared by the architectures."""
-    fig, axes = style.figure("double", 2.4, ncols=len(LEARNED), layout="constrained")
-    grids = [gain_grid(gains, finals[algorithm], algorithm) for algorithm in LEARNED]
+    """Gain at matched rounds for every program and population, final methods (static gradient at 100 nodes) and
+    reactive baselines, on one colour scale."""
+    panels = zero_shot_panels(finals)
+    fig, axes = style.figure("double", 4.6, 2, len(panels) // 2, layout="constrained")
+    grids = [gain_grid(gains, variant, algorithm, interval) for variant, algorithm, _, interval in panels]
     finite = np.concatenate([np.abs(table[np.isfinite(table)]) for table, _ in grids])
     limit = finite.max() if finite.size else 1.0
-    for ax, algorithm, (table, cells) in zip(axes, LEARNED, grids):
-        final = finals[algorithm]
+    for ax, (_, _, title, _), (table, cells) in zip(axes.ravel(), panels, grids):
         for row, column, text in cells:
             strong = abs(table[row, column]) > limit * HeatmapInkThreshold
             ax.text(column, row, text, ha="center", va="center", fontsize=7, color="white" if strong else style.INK)
@@ -228,8 +254,9 @@ def generalization_figure(gains: pd.DataFrame, out: Path, finals: dict[int, str]
         image = ax.imshow(table, cmap=style.DIVERGING, vmin=-limit, vmax=limit, aspect="auto")
         ax.set_xticks(range(len(SIZES)), [f"{size} nodes" for size in SIZES])
         ax.set_yticks(range(len(PROGRAMS)), list(PROGRAMS.values()))
-        ax.set_title(f"{ARCHITECTURE_LABELS[algorithm]}, {VARIANT_LABELS[final].lower()}", loc="left")
-    fig.colorbar(image, ax=axes, label="Error reduction at matched rounds (%)\n* 95% interval includes 0", shrink=.9)
+        ax.set_title(title, loc="left")
+    fig.colorbar(image, ax=axes, label="Error reduction at matched rounds (%)\n* 95% interval includes 0 (learned)",
+                 shrink=.9)
     style.save(fig, out, "zero_shot_gains")
 
 
@@ -309,10 +336,12 @@ def beta_figure(episodes: pd.DataFrame, out: Path, finals: dict[int, str], scena
     style.save(fig, out, "beta_tradeoff")
 
 
-def ablation_figure(gains: pd.DataFrame, out: Path, groups: dict[str, list[tuple]], name: str) -> None:
-    """Validation: paired gain difference of every variant w.r.t. the current one, per scenario group."""
-    whole = gains[(gains.phase == "whole") & gains.algorithm.isin(LEARNED) & (gains.variant != "fixed")]
-    variants = [variant for variant in VARIANT_LABELS if variant in set(whole.variant) and variant != "current"]
+def ablation_figure(gains: pd.DataFrame, out: Path, groups: dict[str, list[tuple]], name: str,
+                    reference: str = "current") -> None:
+    """Validation: paired gain difference of every variant w.r.t. the `reference` one, per scenario group."""
+    whole = gains[(gains.phase == "whole") & gains.algorithm.isin(LEARNED) & (gains.variant != "fixed")
+                  & (gains.beta == FOCUS_BETA)]
+    variants = [variant for variant in VARIANT_LABELS if variant in set(whole.variant) and variant != reference]
     fig, axes = style.figure("double", 0.25 * len(variants) + 0.9, ncols=len(groups), sharey=True,
                              layout="constrained", squeeze=False)
     for ax, (title, members) in zip(axes[0], groups.items()):
@@ -320,7 +349,7 @@ def ablation_figure(gains: pd.DataFrame, out: Path, groups: dict[str, list[tuple
         for offset, algorithm in zip((-0.15, 0.15), LEARNED):
             per_pair = rows[rows.algorithm == algorithm].groupby(["variant", *PAIR]).gain.mean().unstack("variant")
             for index, variant in enumerate(variants):
-                difference = (per_pair[variant] - per_pair["current"]).rename("difference").reset_index()
+                difference = (per_pair[variant] - per_pair[reference]).rename("difference").reset_index()
                 point = crossed_interval(difference, "difference")
                 ax.errorbar(100 * point["mean"], index + offset, xerr=[[100 * (point["mean"] - point["low"])],
                             [100 * (point["high"] - point["mean"])]] if point["complete"] else None,
@@ -328,7 +357,7 @@ def ablation_figure(gains: pd.DataFrame, out: Path, groups: dict[str, list[tuple
                                 ARCHITECTURES[algorithm], label=ARCHITECTURE_LABELS[algorithm] if index == 0 else None))
         ax.axvline(0, color=style.INK_MUTED, linewidth=0.6)
         ax.set_title(title, loc="left")
-        ax.set_xlabel("Gain − current (points)")
+        ax.set_xlabel(f"Gain − {VARIANT_LABELS[reference].lower()} (points)")
     axes[0, 0].set_yticks(range(len(variants)), [VARIANT_LABELS[variant] for variant in variants])
     axes[0, 0].invert_yaxis()
     handles, labels = axes[0, 0].get_legend_handles_labels()

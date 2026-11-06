@@ -58,6 +58,8 @@ MOTION_END_S = 150.0
 # Ordinal ramp of the GNN's betas, light to dark, in its own hue (the MLP keeps the paper's orange ramp).
 GNN_BETA_COLORS = dict(zip(BETAS, mpl.colormaps["RdPu"](np.linspace(0.35, 0.9, len(BETAS)))))
 MLP_BETA_COLORS = dict(zip(BETAS, style.BETA_COLORS.values()))
+# The reactive baselines do not learn and ignore beta: thin dash-dotted curves in their own colours.
+BASELINE_LINE = dict(linestyle="-.", linewidth=0.9)
 # The paper's fixed periods start at 1 s; the campaign's 0.5 s period is drawn lighter than all of them.
 HALF_SECOND_GREY = "#cfcfcf"
 LABELS = {
@@ -92,11 +94,18 @@ def relevant(job: dict, finals: dict[int, str]) -> bool:
         job["algorithm"] in (*FIXED, *BASELINES)
 
 
+def censored_recovery(frame: pd.DataFrame) -> pd.DataFrame:
+    """An episode that does not recover before its end (the 5 s period, sometimes) recovers at least in the time left
+    after the event: a lower bound, so the gains over the fixed periods stay conservative."""
+    censored = frame.recoveryCensored > 0
+    return frame.assign(recoverySeconds=frame.recoverySeconds.mask(censored, EPISODE_LENGTH - EVENT_S))
+
+
 def episode_table(home: Path, jobs: list[dict]) -> pd.DataFrame:
-    """One row per (run, episode), episodes counted from 1."""
+    """One row per (run, episode), episodes counted from 1, the censored recovery times bounded."""
     rows = []
     for job in jobs:
-        frame = pd.read_csv(next((home / "exports" / job["key"]).glob("*_episodes.csv")))
+        frame = censored_recovery(pd.read_csv(next((home / "exports" / job["key"]).glob("*_episodes.csv"))))
         description = {key: value for key, value in job.items() if key != "settings"}
         rows.append(frame[["episode", *EPISODE_COLUMNS]].assign(**description))
     table = pd.concat(rows, ignore_index=True)
@@ -151,13 +160,29 @@ def episode_axis(ax) -> None:
     ax.set_xticks([1, 5, 10, 15, 20])
 
 
-def curve_legend(fig, finals: dict[int, str], fixed_label: str) -> None:
+def baseline_line(ax, rows: pd.DataFrame, metric: str, method: methods.Method) -> None:
+    """A reactive baseline's mean curve over the topologies, in its colour."""
+    mean = rows.groupby("episode")[metric].mean().reindex(EPISODES).to_numpy()
+    ax.plot(EPISODES, mean, zorder=2, **style.line_style(method, label=None, markevery=MARK_EVERY, **BASELINE_LINE))
+
+
+def baseline_handles() -> list[Line2D]:
+    return [style.legend_handle(method, **BASELINE_LINE) for method in BASELINE_METHODS.values()]
+
+
+def curve_handles(finals: dict[int, str], fixed_label: str) -> list[Line2D]:
     handles = [style.legend_handle(architecture(algorithm, finals)) for algorithm in LEARNED]
+    handles += baseline_handles()
     handles.append(Line2D([], [], color=style.fixed_period_color(3.0), linestyle="--", linewidth=0.8,
                           label=fixed_label))
     handles.append(Line2D([], [], color=style.INK_MUTED, linestyle=":", linewidth=0.6,
                           label="training episode with motion"))
-    style.figure_legend(fig, handles, ncol=len(handles))
+    return handles
+
+
+def curve_legend(fig, finals: dict[int, str], fixed_label: str) -> None:
+    handles = curve_handles(finals, fixed_label)
+    style.figure_legend(fig, handles, ncol=(len(handles) + 1) // 2)
 
 
 def learning_curves_reward(table: pd.DataFrame, finals: dict[int, str], motion: list[int], training: int,
@@ -174,6 +199,9 @@ def learning_curves_reward(table: pd.DataFrame, finals: dict[int, str], motion: 
                    for period in FIXED_PERIODS.values()}
         best = max(rewards, key=lambda period: rewards[period][rewards[period].episode > training].reward.mean())
         fixed_line(ax, rewards[best], "reward", best)
+        for algorithm, method in BASELINE_METHODS.items():
+            rows = table[table.algorithm == algorithm]
+            baseline_line(ax, rows.assign(reward=reward_at(rows, beta)), "reward", method)
         ax.set_title(f"$\\beta$ = {beta:g}")
         ax.set_xlabel("Episode")
         episode_axis(ax)
@@ -196,6 +224,8 @@ def learning_curves_metrics(table: pd.DataFrame, finals: dict[int, str], motion:
                             architecture(algorithm, finals), markevery=MARK_EVERY)
             for period in REFERENCE_PERIODS:
                 fixed_line(ax, fixed(table, period), metric, period)
+            for algorithm, method in BASELINE_METHODS.items():
+                baseline_line(ax, table[table.algorithm == algorithm], metric, method)
             ax.set_title(f"$\\beta$ = {beta:g}")
             ax.set_ylabel(LABELS[metric])
             if metric == "rounds":
@@ -335,9 +365,22 @@ def mark_event(ax, scenario: tuple, label: bool) -> None:
                 va="top")
 
 
+def baseline_traces(period_ax, deviation_ax, home: Path, jobs: list[dict]) -> None:
+    """The period and the error of the reactive baselines (they ignore beta: run at the focus one), for reference."""
+    for algorithm, method in BASELINE_METHODS.items():
+        traces = beta_traces(home, jobs, algorithm, FOCUS_BETA)
+        for ax, column in ((period_ax, "period"), (deviation_ax, "deviation")):
+            ax.plot(traces["time"], traces[column].mean(axis=0), color=method.color, zorder=1,
+                    **BASELINE_LINE)
+    deviation_ax.legend(handles=[Line2D([], [], color=method.color, label=method.short, **BASELINE_LINE)
+                                 for method in BASELINE_METHODS.values()],
+                        loc="upper right", fontsize=6, title="ignore $\\beta$", title_fontsize=6)
+
+
 def beta_effect_intra_episode(home: Path, jobs: list[dict], finals: dict[int, str], scenario: tuple, name: str,
                               out: Path) -> None:
-    """How beta shapes the wake-up schedule and the error of each architecture within the evaluation episodes."""
+    """How beta shapes the wake-up schedule and the error of each architecture within the evaluation episodes,
+    against the reactive baselines."""
     fig, axes = style.figure("double", 3.6, 2, len(LEARNED), sharex=True)
     for column, (algorithm, colours) in enumerate(zip(LEARNED, (GNN_BETA_COLORS, MLP_BETA_COLORS))):
         period_ax, deviation_ax = axes[:, column]
@@ -346,6 +389,7 @@ def beta_effect_intra_episode(home: Path, jobs: list[dict], finals: dict[int, st
             mean_band(period_ax, traces["time"], traces["period"], colours[beta], f"{beta:g}", linewidth=1.0)
             mean_band(deviation_ax, traces["time"], traces["deviation"], colours[beta], linewidth=1.0,
                       nonnegative=True)
+        baseline_traces(period_ax, deviation_ax, home, jobs)
         period_ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.08), ncol=len(BETAS), fontsize=6,
                          title=f"{architecture(algorithm, finals).label}, $\\beta$ =", title_fontsize=6.5)
         period_ax.set_ylabel("Effective wake-up period (s)")

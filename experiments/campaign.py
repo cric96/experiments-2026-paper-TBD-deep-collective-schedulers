@@ -50,6 +50,8 @@ COMMON = dict(warmStart=0, mobilityModel='Waypoint', costSignal='Staleness', los
               trainingSpeeds='0,0,1,0,0,2', motionDuration=50., trainingEpisodes=10, episodes=20,
               stepsPerEpisode=440, finalMultiplier=1, ownSpeed=1, neighbourSpeed=1,
               errorTolerance=0., exportDirectory='', completeReplay=0)
+# The reward shape of the full-range scale (TradeOff.BetaScale.FullRange), shared by its learners and baselines.
+FULL_RANGE_SHAPE = dict(betaScale='FullRange', steadyState=1.0)
 VARIANTS = {
     'current': dict(unexplainedChange=1, dependants=1),
     'legacy': dict(legacy=True),
@@ -74,8 +76,52 @@ VARIANTS = {
     'legacy-paper-steps': dict(legacy=True, stepsPerEpisode=110),
     'legacy-static-training': dict(legacy=True, trainingEvents='SourceSwitch', trainingSpeeds='0'),
     'legacy-paper-training': dict(legacy=True, stepsPerEpisode=110, trainingEvents='SourceSwitch', trainingSpeeds='0'),
+    # The original learner with a reshaped reward (TradeOff.RewardShape, 2026-11-05). Its default steady-state pressure
+    # (0.06) asks a stable node for 2.6 s at beta 0.95, while the reactive baselines sleep 5 s; its intensity gain (8)
+    # asks an unstable node for about 0.5 s at every beta >= 0.8, so beta mostly tunes the rounds of stable nodes.
+    # Quiet: stable nodes sleep longer (4.3 s at beta 0.95, 2 s at beta 1). Graded: stable nodes sleep almost 5 s up to
+    # beta 0.95, and beta tunes the reaction of the unstable ones (2.7 s at beta 0.5, 0.7 s at 0.95).
+    'legacy-quiet': dict(legacy=True, steadyState=0.01),
+    'legacy-graded': dict(legacy=True, steadyState=0.005, intensityGain=1.0),
+    # The same, and a node without a value yet (the field has not reached it) sees it in its state and counts as fully
+    # unstable: with the other shapes it looks converged and sleeps through the start-up, where the baselines win.
+    'legacy-quiet-awaiting': dict(legacy=True, steadyState=0.01, missingValue=1, missingValueIntensity=1.0),
+    'legacy-graded-awaiting': dict(legacy=True, steadyState=0.005, intensityGain=1.0, missingValue=1,
+                                   missingValueIntensity=1.0),
+    # Beta as a linear dial (TradeOff.BetaScale.Linear): on the ratio scale the best period saturates (a node without
+    # a value or unstable asks for 0.5-1 s at every beta >= 0.5, a stable one for about 5 s up to 0.95), so beta
+    # changes little; on the linear scale an urgent node asks for 5 - 4.5 beta s and a stable one (urgency 0.2) for
+    # 5 - 0.9 beta s, on its own grid of betas (GRIDS).
+    'legacy-linear-awaiting': dict(legacy=True, betaScale='Linear', steadyState=0.2, missingValue=1,
+                                   missingValueIntensity=1.0),
+    # The same, but a node without a value only sees it in its state, without counting as unstable: it hurries only
+    # when its output or its neighbourhood changes (as Trickle after a change), instead of spending rounds while it
+    # waits for the field to reach it.
+    'legacy-linear-patient': dict(legacy=True, betaScale='Linear', steadyState=0.2, missingValue=1,
+                                  missingValueIntensity=0.0),
+    # Beta over the whole range of periods (TradeOff.BetaScale.FullRange): on the other scales a stable node asks for
+    # 4.1 s (linear) or 2 s (ratio) even at beta 1, so no beta comes near the fast fixed periods; here it asks for
+    # 5 - 4.5 beta s (0.7 s at 0.95) and an unstable one divides its odds of sleeping by 1 + 8 I.
+    'legacy-full-range': dict(legacy=True, **FULL_RANGE_SHAPE, missingValue=1, missingValueIntensity=1.0),
 }
+# Betas swept and focus beta of the variants that do not use the ratio scale of the original objective.
+LINEAR_GRID = ([.2, .4, .6, .8, 1.], .8)
+GRIDS = {'legacy-linear-awaiting': LINEAR_GRID, 'legacy-linear-patient': LINEAR_GRID,
+         'legacy-full-range': ([.2, .4, .6, .8, .95], .8)}
+# Trickle and the gradual controller tuned by beta: after a change they fall back to the best period of an urgent node
+# on the linear scale instead of 0.5 s. Shared controls like the fixed periods, on the grid of the learned variants.
+TUNED_BASELINES = 'tuned-baselines'
+# On the full-range scale they move between the best periods of an unstable and of a stable node (BaselineTuning).
+RANGE_BASELINES = 'range-baselines'
+CONTROL_SETTINGS = {TUNED_BASELINES: dict(tunedBaselines=1), RANGE_BASELINES: dict(tunedBaselines=2, **FULL_RANGE_SHAPE)}
+# The tuned baselines that go with a variant (TUNED_BASELINES by default).
+TUNED_CONTROLS = {'legacy-full-range': RANGE_BASELINES}
 FAMILIES = ('static', 'dynamic', 'generalization', 'beta-study', 'attention', 'filmstrip', 'learning')
+
+
+def grid_of(variant):
+    """The betas swept and the focus beta of `variant`."""
+    return GRIDS.get(variant, (BETAS, FOCUS_BETA))
 
 
 def digest(path):
@@ -111,7 +157,7 @@ def archive_charts(charts=ROOT / 'charts'):
 
 def settings_of(variant, algorithm, beta, training_seed, evaluation_seed, scenario, smoke, overrides=None):
     family, program, nodes, speed = scenario
-    settings = {**COMMON, **(overrides or {}), **VARIANTS.get(variant, {})}
+    settings = {**COMMON, **(overrides or {}), **VARIANTS.get(variant, CONTROL_SETTINGS.get(variant, {}))}
     legacy = settings.pop('legacy', False)
     settings.update(random=training_seed, evaluationSeed=evaluation_seed, evaluationNodes=nodes,
                     algoId=({0: 9, 1: 8}[algorithm] if legacy else algorithm), weight=beta,
@@ -156,39 +202,64 @@ def shared_jobs(split, scenarios, smoke=False, overrides=None, algorithms=(*FIXE
                       overrides=overrides)
 
 
+def tuned_baseline_jobs(split, scenarios, swept_scenarios, grid, smoke=False, overrides=None, control=TUNED_BASELINES):
+    """Trickle and the gradual controller tuned by beta (as `control`), once per evaluation seed: every beta of `grid`
+    (betas, focus) on `swept_scenarios`, the focus beta on the others."""
+    betas, focus = grid
+    seed = TRAIN_SEEDS[split][0]
+    for scenario in scenarios:
+        for beta, evaluation_seed, algorithm in product(betas if scenario in swept_scenarios else [focus],
+                                                        seeds_of(split, smoke)[1], BASELINES):
+            yield job(split, control, algorithm, beta, seed, evaluation_seed, scenario, smoke, shared=True,
+                      overrides=overrides)
+
+
 def jobs(split, variants, smoke=False, shared=True, finals=None, algorithms=LEARNED, families=None, overrides=None,
-         beta_study_only=False):
+         beta_study_only=False, swept=(), controls=True, tuned_baselines=False):
     """Validation: every variant on the core scenarios at the focus beta. Test: `variants` (the control and the
     selections) on every scenario, the legacy control on the comparable ones, and the beta study of the final variant
     of each architecture (`finals`: algorithm -> variant, by default the last of `variants`). `algorithms` and
     `families` restrict a diagnostic campaign; `overrides` set a setting of every run, the controls included;
-    `beta_study_only` keeps only the other betas of the finals (a supplement to a test campaign that has the rest)."""
+    `beta_study_only` keeps only the other betas of the finals (a supplement to a test campaign that has the rest);
+    `swept` families run every variant at every beta (a validation of the trade-off curves); without `controls`, a
+    test campaign leaves out the legacy control (another campaign of the same seeds has it); `tuned_baselines` adds
+    the baselines tuned by beta on the grid of the last variant, swept where the variants are. Each variant sweeps its
+    own grid of betas (`grid_of`)."""
     scenarios = SCENARIOS[split]
     if smoke:
         scenarios = [STATIC, *PROGRAMS]
     if families:
         scenarios = [scenario for scenario in scenarios if scenario[0] in families]
     for variant in ([] if beta_study_only else variants):
-        yield from learned_jobs(split, variant, scenarios, [FOCUS_BETA], smoke, algorithms, overrides)
+        for scenario in scenarios:
+            grid, focus = grid_of(variant)
+            betas = grid if scenario[0] in swept else [focus]
+            yield from learned_jobs(split, variant, [scenario], betas, smoke, algorithms, overrides)
     beta_scenarios = []
     if split == 'test':
-        if 'legacy' not in variants and not beta_study_only:
+        if controls and 'legacy' not in variants and not beta_study_only:
             yield from learned_jobs(split, 'legacy', [s for s in LEGACY_SCENARIOS if s in scenarios], [FOCUS_BETA], smoke,
                                     overrides=overrides)
         beta_scenarios = [s for s in CORE if s in scenarios]
-        others = [beta for beta in BETAS if beta != FOCUS_BETA]
         for algorithm in LEARNED:
             final = (finals or {}).get(algorithm, variants[-1])
+            grid, focus = grid_of(final)
+            others = [beta for beta in grid if beta != focus]
             yield from learned_jobs(split, final, beta_scenarios, others, smoke, (algorithm,), overrides)
     if shared:
         yield from shared_jobs(split, scenarios, smoke, overrides)
+    if tuned_baselines:
+        swept_scenarios = [s for s in scenarios if s[0] in swept or s in beta_scenarios]
+        yield from tuned_baseline_jobs(split, scenarios, swept_scenarios, grid_of(variants[-1]), smoke, overrides,
+                                       TUNED_CONTROLS.get(variants[-1], TUNED_BASELINES))
 
 
 def prepare(split, variants, smoke=False, name=None, shared=True, finals=None, algorithms=LEARNED, families=None,
-            overrides=None, beta_study_only=False):
+            overrides=None, beta_study_only=False, swept=(), controls=True, tuned_baselines=False):
     home = HOME / (name or ('smoke' if smoke else split))
     home.mkdir(parents=True, exist_ok=True)
-    plan = list(jobs(split, variants, smoke, shared, finals, algorithms, families, overrides, beta_study_only))
+    plan = list(jobs(split, variants, smoke, shared, finals, algorithms, families, overrides, beta_study_only, swept,
+                     controls, tuned_baselines))
     manifest = home / 'manifest.json'
     if manifest.exists():
         if json.loads(manifest.read_text()) != plan:
@@ -284,6 +355,13 @@ def main():
                         help='Run the scenarios of these families before the others (e.g. static, for the beta study)')
     parser.add_argument('--beta-study-only', action='store_true',
                         help='Test: only the other betas of the selected variants (with --without-shared)')
+    parser.add_argument('--sweep-families', nargs='+', default=[], choices=('static', 'dynamic', 'generalization'),
+                        help='Validation: run every variant at every beta on these families (trade-off curves)')
+    parser.add_argument('--without-controls', action='store_true',
+                        help='Test: only the selected variants, not the current and legacy controls (a campaign of '
+                             'the same seeds has them)')
+    parser.add_argument('--tuned-baselines', action='store_true',
+                        help='Also Trickle and the gradual controller tuned by beta, on the grid of the variants')
     parser.add_argument('--set', dest='overrides', nargs='+', default=[], metavar='NAME=VALUE',
                         help='Setting of every run of the campaign, the shared controls included (e.g. retention=15)')
     args = parser.parse_args()
@@ -295,10 +373,11 @@ def main():
         finals = {int(algorithm): variant for algorithm, variant in
                   selection.get('byArchitecture', {str(a): selection['variant'] for a in LEARNED}).items()}
         # The control first, then the selections.
-        variants = list(dict.fromkeys(['current', *finals.values()]))
+        variants = list(dict.fromkeys([*([] if args.without_controls else ['current']), *finals.values()]))
     overrides = {name: json.loads(value) for name, value in (item.split('=', 1) for item in args.overrides)}
     home, plan = prepare(args.split, variants, args.smoke, args.name, not args.without_shared, finals,
-                         tuple(args.algorithms), args.families, overrides or None, args.beta_study_only)
+                         tuple(args.algorithms), args.families, overrides or None, args.beta_study_only,
+                         tuple(args.sweep_families), not args.without_controls, args.tuned_baselines)
     print(f'{len(plan)} runs: {home}', flush=True)
     if args.action == 'run':
         with ThreadPoolExecutor(max_workers=args.workers) as executor:

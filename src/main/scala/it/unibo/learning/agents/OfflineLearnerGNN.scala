@@ -9,7 +9,7 @@ import it.unibo.learning.abstractions.{AgentState, Trajectory}
 import it.unibo.learning.agents.OfflineLearnerGNN.*
 import it.unibo.learning.agents.offline.BatchTensors.{column, rows}
 import it.unibo.learning.agents.offline.*
-import it.unibo.learning.encoding.{MobileEncoding, MobileFeatures, StarGraph}
+import it.unibo.learning.encoding.{MissingValue, MobileEncoding, MobileFeatures, StarGraph}
 import it.unibo.learning.network.{EdgeGATBlock, MinMaxActionScaler, TorchNetwork}
 import it.unibo.learning.network.NDArrayOps.*
 
@@ -34,7 +34,9 @@ final class OfflineLearnerGNN(
     replayCapacity: Int = MobileObjective.ReplayCapacityPerRegime,
     mobileFeatures: MobileFeatures = MobileFeatures.None,
     periodExploration: PeriodExploration = PeriodExploration.Uniform,
-    mobileEncoding: Boolean = true
+    mobileEncoding: Boolean = true,
+    rewardShape: TradeOff.RewardShape = TradeOff.RewardShape(),
+    missingValueFeature: Boolean = false
 ) extends EpisodicOfflineLearner[GraphTransition](
       randomKey,
       weight,
@@ -43,7 +45,9 @@ final class OfflineLearnerGNN(
       transitionCapacity = if mobile then replayCapacity else Int.MaxValue
     ):
   private val selfDim: Int =
-    if mobile && mobileEncoding then MobileEncoding.selfDim(mobileFeatures) else StarGraph.SelfDim
+    if mobile && mobileEncoding then MobileEncoding.selfDim(mobileFeatures)
+    else if missingValueFeature then StarGraph.SelfDim + 1
+    else StarGraph.SelfDim
   private val neighDim: Int =
     if mobile && mobileEncoding then MobileEncoding.neighDim(mobileFeatures) else StarGraph.NeighDim
   private val actionScaler: MinMaxActionScaler = MinMaxActionScaler(min, max)
@@ -105,19 +109,25 @@ final class OfflineLearnerGNN(
 
   override protected def record(trajectory: Trajectory): Unit =
     Relabelling
-      .relabel(trajectory, weight, gamma.toDouble, encodeForOwnWeight, StarGraph.BetaFeature, mobile)
+      .relabel(trajectory, weight, gamma.toDouble, encodeForOwnWeight, StarGraph.BetaFeature, mobile, rewardShape.scale)
       .foreach(relabelled => transitions.add(toTransition(relabelled), relabelled.isUnstable))
 
   private def encodeState(state: AgentState, beta: Double): Array[Float] =
     if mobile && mobileEncoding then MobileEncoding.graph(state, beta, max, mobileFeatures)
-    else StarGraph.encode(state, beta, max)
+    else
+      rewardShape.scale.conditioned(
+        StarGraph.encode(state, beta, max, missingValueFeature),
+        StarGraph.BetaFeature,
+        beta
+      )
 
   private def encodeForOwnWeight(state: AgentState): Array[Float] = encodeState(state, weight)
 
   private def toTransition(relabelled: RelabelledStep): GraphTransition =
     val period = relabelled.step.action
     val u = TradeOff.normalizedPeriod(period, min, max)
-    val weights = TradeOff.objectiveWeights(relabelled.intensity, relabelled.beta)
+    val intensity = rewardShape.intensity(relabelled.intensity, !MissingValue.of(relabelled.step.state))
+    val weights = TradeOff.objectiveWeights(intensity, relabelled.beta, rewardShape)
     GraphTransition(
       state = relabelled.state,
       scaledAction = actionScaler.scale(period),

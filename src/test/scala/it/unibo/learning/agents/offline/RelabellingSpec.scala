@@ -40,6 +40,20 @@ class RelabellingSpec extends AnyFlatSpec with Matchers:
       transition.nextState(betaIndex) shouldBe TradeOff.betaFeature(transition.beta)
     }
 
+  "The counterfactual weights" should "be those of the ratio scale of the original objective" in {
+    Relabelling.CounterfactualWeights shouldBe TradeOff.BetaScale.Ratio.counterfactualWeights
+  }
+
+  "Relabelling on the linear scale" should "relabel for its weights and condition the states with its feature" in {
+    val linear = TradeOff.BetaScale.Linear
+    val steps = Relabelling.relabel(trajectory, ownWeight, gamma, encode, betaIndex, scale = linear)
+    steps.take(weightsPerStep).map(_.beta) shouldBe Relabelling.targetWeights(ownWeight, linear.counterfactualWeights)
+    steps.foreach { transition =>
+      transition.state(betaIndex) shouldBe linear.feature(transition.beta)
+      transition.nextState(betaIndex) shouldBe linear.feature(transition.beta)
+    }
+  }
+
   it should "link each step to the next one, and the last one to itself as a terminal transition" in {
     val firstOfEachStep = relabelled.grouped(weightsPerStep).map(_.head).toSeq
     firstOfEachStep.map(transition => (transition.state(0), transition.nextState(0), transition.isTerminal)) shouldBe

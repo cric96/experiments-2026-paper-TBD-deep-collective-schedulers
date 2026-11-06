@@ -18,3 +18,9 @@ class SpatialTemporalSpec extends AnyFlatSpec with Matchers:
   it should "have the declared size" in {
     fixtures.map(SpatialTemporal.encode(_, 0.95, 5.0).length).distinct shouldBe Seq(SpatialTemporal.FeatureDim)
   }
+
+  it should "append the missing-value feature when asked" in
+    fixtures.foreach { state =>
+      SpatialTemporal.encode(state, 0.95, 5.0, missingValueFeature = true).toSeq shouldBe
+        (SpatialTemporal.encode(state, 0.95, 5.0) :+ MissingValue.feature(state)).toSeq
+    }

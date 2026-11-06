@@ -7,7 +7,7 @@ import it.unibo.learning.abstractions.{AgentState, Trajectory}
 import it.unibo.learning.agents.OfflineLearnerContinuous.*
 import it.unibo.learning.agents.offline.BatchTensors.{column, rows}
 import it.unibo.learning.agents.offline.*
-import it.unibo.learning.encoding.{MobileEncoding, MobileFeatures, SpatialTemporal}
+import it.unibo.learning.encoding.{MissingValue, MobileEncoding, MobileFeatures, SpatialTemporal}
 import it.unibo.mobility.MobileObjective
 import it.unibo.learning.network.{MinMaxActionScaler, TorchNetwork}
 import it.unibo.learning.network.NDArrayOps.*
@@ -37,7 +37,9 @@ final class OfflineLearnerContinuous(
     replayCapacity: Int = MobileObjective.ReplayCapacityPerRegime,
     mobileFeatures: MobileFeatures = MobileFeatures.None,
     periodExploration: PeriodExploration = PeriodExploration.Uniform,
-    mobileEncoding: Boolean = true
+    mobileEncoding: Boolean = true,
+    rewardShape: TradeOff.RewardShape = TradeOff.RewardShape(),
+    missingValueFeature: Boolean = false
 ) extends EpisodicOfflineLearner[ContinuousTransition](
       randomKey,
       weight,
@@ -45,7 +47,10 @@ final class OfflineLearnerContinuous(
       batchSize,
       transitionCapacity = if mobile then replayCapacity else Int.MaxValue
     ):
-  private val inputDim: Int = if mobile && mobileEncoding then MobileEncoding.featureDim(mobileFeatures) else stateDim
+  private val inputDim: Int =
+    if mobile && mobileEncoding then MobileEncoding.featureDim(mobileFeatures)
+    else if missingValueFeature then stateDim + 1
+    else stateDim
   private val actionScaler: MinMaxActionScaler = MinMaxActionScaler(min, max)
   private val networkSeed: Int = LearnerSeeds.networks(randomKey, weight)
   private val actor: TorchNetwork[SequentialBlock] = actorNetwork("actor", seedOffset = 1)
@@ -84,14 +89,24 @@ final class OfflineLearnerContinuous(
 
   override protected def record(trajectory: Trajectory): Unit =
     Relabelling
-      .relabel(trajectory, weight, gamma.toDouble, encodeForOwnWeight, SpatialTemporal.Feature.Beta, mobile)
+      .relabel(trajectory, weight, gamma.toDouble, encodeForOwnWeight, SpatialTemporal.Feature.Beta, mobile,
+        rewardShape.scale)
       .foreach(relabelled => transitions.add(toTransition(relabelled), relabelled.isUnstable))
 
   private def encodeState(state: AgentState, beta: Double): Array[Float] =
     if mobile && mobileEncoding then MobileEncoding.spatial(state, beta, max, mobileFeatures)
-    else SpatialTemporal.encode(state, beta, max)
+    else
+      rewardShape.scale.conditioned(
+        SpatialTemporal.encode(state, beta, max, missingValueFeature),
+        SpatialTemporal.Feature.Beta,
+        beta
+      )
 
   private def encodeForOwnWeight(state: AgentState): Array[Float] = encodeState(state, weight)
+
+  /** The intensity that shapes the reward of a step (see [[TradeOff.RewardShape]]). */
+  private def rewardIntensity(relabelled: RelabelledStep): Double =
+    rewardShape.intensity(relabelled.intensity, !MissingValue.of(relabelled.step.state))
 
   private def toTransition(relabelled: RelabelledStep): ContinuousTransition =
     val period = relabelled.step.action
@@ -99,8 +114,8 @@ final class OfflineLearnerContinuous(
       state = relabelled.state,
       scaledAction = actionScaler.scale(period),
       reward = relabelled.errorIntegral
-        .fold(TradeOff.offlineReward(relabelled.intensity, period, relabelled.beta, min, max))(cost =>
-          MobileObjective.reward(cost, relabelled.energyCost, relabelled.beta)
+        .fold(TradeOff.offlineReward(rewardIntensity(relabelled), period, relabelled.beta, min, max, rewardShape))(
+          cost => MobileObjective.reward(cost, relabelled.energyCost, relabelled.beta)
         )
         .toFloat,
       nextState = relabelled.nextState,

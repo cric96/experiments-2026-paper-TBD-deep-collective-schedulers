@@ -42,23 +42,39 @@ def paper_methods(finals: dict[int, str]) -> tuple[methods.Method, ...]:
                  for algorithm in LEARNED)
 
 
+def summary_methods(finals: dict[int, str]) -> tuple[methods.Method, ...]:
+    """The learned methods and the reactive baselines, in the order of the summary figures."""
+    return (*paper_methods(finals), *BASELINE_METHODS.values())
+
+
+def per_topology(evaluation: pd.DataFrame, algorithms) -> pd.DataFrame:
+    """A schedule that does not learn, one row per evaluation episode: every one has a topology of its own, so only
+    the topology varies."""
+    rows = evaluation[evaluation.algorithm.isin(algorithms)].groupby(["algorithm", "evaluation_seed", "episode"])
+    rows = rows[COLUMNS].mean().reset_index()
+    return rows.assign(seed=rows.evaluation_seed * TOPOLOGIES_PER_SEED + rows.episode) \
+        .drop(columns=["evaluation_seed", "episode"])
+
+
+def at_every_beta(rows: pd.DataFrame, **columns) -> list[pd.DataFrame]:
+    """A schedule that ignores beta, repeated at every beta with the reward of that beta."""
+    return [rows.assign(weight=beta, rewardRate=reward_at(rows, beta), **columns) for beta in BETAS]
+
+
 def paper_evaluation(table: pd.DataFrame, training: int) -> pd.DataFrame:
     """One row per (method, beta, seed), as the paper's evaluation table: the learned methods per training seed
-    (mean over the evaluation episodes), the fixed periods per evaluation episode (every one has a topology of its
-    own; they do not learn, so only the topology varies), repeated at every beta with the reward of that beta."""
+    (mean over the evaluation episodes); the fixed periods and the reactive baselines per evaluation episode, repeated
+    at every beta with the reward of that beta."""
     evaluation = table[table.episode > training]
     frames = []
     for algorithm in LEARNED:
         means = evaluation[evaluation.algorithm == algorithm].groupby(["beta", "training_seed"])[COLUMNS].mean()
         frames.append(means.reset_index().rename(columns={"beta": "weight", "training_seed": "seed"})
                       .assign(method=KEYS[algorithm], period=np.nan))
-    fixed = evaluation[evaluation.algorithm.isin(FIXED)].groupby(["algorithm", "evaluation_seed", "episode"])[COLUMNS]
-    fixed = fixed.mean().reset_index()
-    fixed = fixed.assign(seed=fixed.evaluation_seed * TOPOLOGIES_PER_SEED + fixed.episode)
-    fixed = fixed.drop(columns=["evaluation_seed", "episode"])
-    for beta in BETAS:
-        frames.append(fixed.assign(method=methods.FIXED.key, weight=beta, period=fixed.algorithm.map(FIXED_PERIODS),
-                                   rewardRate=reward_at(fixed, beta)))
+    fixed = per_topology(evaluation, FIXED)
+    frames += at_every_beta(fixed, method=methods.FIXED.key, period=fixed.algorithm.map(FIXED_PERIODS))
+    for algorithm, method in BASELINE_METHODS.items():
+        frames += at_every_beta(per_topology(evaluation, [algorithm]), method=method.key, period=np.nan)
     return pd.concat(frames, ignore_index=True).drop(columns="algorithm").rename(columns=PAPER_NAMES)
 
 
@@ -77,7 +93,7 @@ def campaign_labels():
 
 
 def summary_figures(table: pd.DataFrame, finals: dict[int, str], training: int, out: Path) -> None:
-    learned = paper_methods(finals)
+    learned = summary_methods(finals)
     evaluation = paper_evaluation(table, training)
     data = SimpleNamespace(evaluation=evaluation, methods=learned, gains=results.frontier_gains(evaluation, learned))
     with campaign_labels():
@@ -97,8 +113,9 @@ def overview_entries(finals: dict[int, str]) -> list[tuple[str, str, str, float,
         method = architecture(algorithm, finals)
         entries.append((method.label, method.color, method.marker, 1.0,
                         dict(algorithm=algorithm, variant=finals[algorithm])))
-        entries.append((f"{method.label.split(',')[0]}, legacy objective", method.color, method.marker,
-                        LEGACY_ALPHA, dict(algorithm=algorithm, variant="legacy")))
+        if finals[algorithm] != "legacy":
+            entries.append((f"{method.label.split(',')[0]}, legacy objective", method.color, method.marker,
+                            LEGACY_ALPHA, dict(algorithm=algorithm, variant="legacy")))
     return entries
 
 

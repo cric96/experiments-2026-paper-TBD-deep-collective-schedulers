@@ -29,6 +29,19 @@ variables:
   ownSpeed: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
   unexplainedChange: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
   dependants: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
+  # Reward shape of the original learners (8, 9); the defaults are those of TradeOff.RewardShape.
+  steadyState: { type: ArbitraryVariable, parameters: [0.06, [0.06]] }
+  intensityGain: { type: ArbitraryVariable, parameters: [8.0, [8.0]] }
+  missingValueIntensity: { type: ArbitraryVariable, parameters: [0.0, [0.0]] }
+  # Whether the original learners see if a node has no value yet (one more feature).
+  missingValue: { type: ArbitraryVariable, parameters: [0, [0]] }
+  # How beta weights the objectives of the original learners (TradeOff.BetaScale): Ratio (original), Linear or
+  # FullRange.
+  betaScale: { type: ArbitraryVariable, parameters: ["Ratio", ["Ratio"]] }
+  # How beta tunes Trickle and the gradual controller (ordinal of BaselineTuning): 0 untuned (0.5-5 s); 1 after a
+  # change they fall back to the best period of an urgent node on the linear scale (5 s at beta 0, 0.5 s at beta 1);
+  # 2 they move between the best periods of an unstable and of a stable node under the reward shape.
+  tunedBaselines: { type: ArbitraryVariable, parameters: [0, [0]] }
   # What happens halfway through the evaluation episodes, and the cycle of the training ones (comma-separated).
   episodeEvent: { type: ArbitraryVariable, parameters: ["SourceSwitch", ["SourceSwitch", "RegionStartsMoving", "SourceSwitchWhileRegionMoves"]] }
   trainingEvents: { type: ArbitraryVariable, parameters: ["SourceSwitch", ["SourceSwitch", "SourceSwitch,RegionStartsMoving,RegionStartsMoving", "SourceSwitchWhileRegionMoves"]] }
@@ -88,15 +101,18 @@ variables:
       val exploration = it.unibo.learning.agents.offline.PeriodExploration.valueOf(periodExploration.as[String]);
       val encoding = mobileEncoding.as[Number].intValue() != 0;
       val multiplier = finalMultiplier.as[Number].intValue();
+      val shape = it.unibo.learning.TradeOff.RewardShape(steadyState.as[Double], intensityGain.as[Double], missingValueIntensity.as[Double], it.unibo.learning.TradeOff.BetaScale.valueOf(betaScale.as[String]));
+      val reactive = it.unibo.learning.agents.BaselineTuning.fromOrdinal(tunedBaselines.as[Number].intValue()).periods(beta, shape, 0.5, 5.0);
+      val missing = missingValue.as[Number].intValue() != 0;
       algoId.as[Number].intValue() match {
         case 0 => new OfflineLearnerGNN(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, mobile = true, replayCapacity = capacity, mobileFeatures = features, periodExploration = exploration, mobileEncoding = encoding, finalTrainingMultiplier = (if (multiplier > 0) multiplier else 2))
         case 1 => new OfflineLearnerContinuous(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, mobile = true, replayCapacity = capacity, mobileFeatures = features, periodExploration = exploration, mobileEncoding = encoding, finalTrainingMultiplier = (if (multiplier > 0) multiplier else 3))
         case 2 => new HeuristicAdaptiveAgent(Seq(0.5, 1.0, 2.0, 3.0, 4.0, 5.0), beta)
-        case 8 => new OfflineLearnerContinuous(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, inspectionEnabled = false)
-        case 9 => new OfflineLearnerGNN(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps)
+        case 8 => new OfflineLearnerContinuous(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, inspectionEnabled = false, rewardShape = shape, missingValueFeature = missing)
+        case 9 => new OfflineLearnerGNN(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, rewardShape = shape, missingValueFeature = missing)
         case 10 => new SameActionAgent(0.5)
-        case 11 => new TrickleAgent(0.5, 5.0)
-        case 12 => new GradualAgent(0.5, 5.0)
+        case 11 => new TrickleAgent(reactive.shortest, reactive.longest)
+        case 12 => new GradualAgent(reactive.shortest, reactive.longest)
         case fixed => new SameActionAgent((fixed - 2).toDouble)
       }
     language: scala

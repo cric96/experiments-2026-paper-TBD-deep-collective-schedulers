@@ -48,8 +48,8 @@ object DeferredBeta:
 /** Hindsight relabelling of the trajectories collected with one trade-off weight for many others. */
 object Relabelling:
 
-  /** The trade-off weights every step is relabelled for, besides the learner's own one. */
-  val CounterfactualWeights: Seq[Double] = Seq(0.5, 0.8, 0.95, 0.99, 1.0)
+  /** The trade-off weights every step is relabelled for, besides the learner's own one (original objective). */
+  val CounterfactualWeights: Seq[Double] = TradeOff.BetaScale.Ratio.counterfactualWeights
 
   /** How many times the learner's own weight is repeated, to oversample the trade-off it was configured with. */
   val OwnWeightRepetitions: Int = 2
@@ -57,10 +57,11 @@ object Relabelling:
   /** Wake-up periods shorter than this are discounted as if they lasted this long. */
   val MinDiscountPeriod: Double = 0.5
 
-  def targetWeights(ownWeight: Double): Seq[Double] = Seq.fill(OwnWeightRepetitions)(ownWeight) ++ CounterfactualWeights
+  def targetWeights(ownWeight: Double, counterfactual: Seq[Double] = CounterfactualWeights): Seq[Double] =
+    Seq.fill(OwnWeightRepetitions)(ownWeight) ++ counterfactual
 
   /** Relabels every step of `trajectory` (encoded with `encode`, whose β feature is at `betaFeatureIndex`) for every
-    * target weight; the last step is terminal and points to itself.
+    * target weight of `scale`; the last step is terminal and points to itself.
     */
   def relabel(
       trajectory: Trajectory,
@@ -68,17 +69,20 @@ object Relabelling:
       gamma: Double,
       encode: AgentState => Array[Float],
       betaFeatureIndex: Int,
-      mobile: Boolean = false
+      mobile: Boolean = false,
+      scale: TradeOff.BetaScale = TradeOff.BetaScale.Ratio
   ): Seq[RelabelledStep] =
-    if mobile then relabelMobile(trajectory, ownWeight, gamma, encode, betaFeatureIndex)
-    else relabelLegacy(trajectory, ownWeight, gamma, encode, betaFeatureIndex)
+    val weights = targetWeights(ownWeight, scale.counterfactualWeights)
+    if mobile then relabelMobile(trajectory, weights, gamma, encode, betaFeatureIndex)
+    else relabelLegacy(trajectory, weights, gamma, encode, betaFeatureIndex, scale)
 
   private def relabelLegacy(
       trajectory: Trajectory,
-      ownWeight: Double,
+      weights: Seq[Double],
       gamma: Double,
       encode: AgentState => Array[Float],
-      betaFeatureIndex: Int
+      betaFeatureIndex: Int,
+      scale: TradeOff.BetaScale
   ): Seq[RelabelledStep] =
     val states = trajectory.map(step => encode(step.state)).toIndexedSeq
     trajectory.zipWithIndex.flatMap { case (step, index) =>
@@ -86,15 +90,15 @@ object Relabelling:
       val nextState = if isTerminal then states(index) else states(index + 1)
       val intensity = InstabilityIntensity.of(step.state)
       val discount = math.pow(gamma, math.max(MinDiscountPeriod, step.action)).toFloat
-      targetWeights(ownWeight).map { beta =>
-        def conditioned(features: Array[Float]) = withBetaFeature(features, beta, betaFeatureIndex)
+      weights.map { beta =>
+        def conditioned(features: Array[Float]) = withBetaFeature(features, beta, betaFeatureIndex, scale)
         RelabelledStep(step, conditioned(states(index)), conditioned(nextState), beta, intensity, isTerminal, discount)
       }
     }
 
   private def relabelMobile(
       trajectory: Trajectory,
-      ownWeight: Double,
+      weights: Seq[Double],
       gamma: Double,
       encode: AgentState => Array[Float],
       betaFeatureIndex: Int
@@ -105,7 +109,7 @@ object Relabelling:
       outcome.errorIntegrals.toSeq.sortBy(_._1).flatMap { case (tolerance, cost) =>
         val current = encode(step.state.copy(tolerance = tolerance))
         val next = encode(outcome.nextState.copy(tolerance = tolerance))
-        targetWeights(ownWeight).map { beta =>
+        weights.map { beta =>
           RelabelledStep(
             step,
             current,
@@ -122,8 +126,13 @@ object Relabelling:
       }
     }
 
-  private def withBetaFeature(features: Array[Float], beta: Double, betaFeatureIndex: Int): Array[Float] =
+  private def withBetaFeature(
+      features: Array[Float],
+      beta: Double,
+      betaFeatureIndex: Int,
+      scale: TradeOff.BetaScale
+  ): Array[Float] =
     val conditioned = features.clone()
-    conditioned(betaFeatureIndex) = TradeOff.betaFeature(beta)
+    conditioned(betaFeatureIndex) = scale.feature(beta)
     conditioned
 end Relabelling

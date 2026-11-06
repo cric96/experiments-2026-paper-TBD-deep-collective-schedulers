@@ -36,9 +36,11 @@ object StarGraph:
   /** What a neighbour slot is computed against: the previous snapshot and the node's own last two outputs. */
   final private case class Reference(previous: Snapshot, ownNow: Double, ownBefore: Double, scale: Double)
 
-  def encode(state: AgentState, weight: Double, maxAction: Double): Array[Float] =
+  /** The ego features, the [[MissingValue]] feature if `missingValueFeature` (one ego feature more), and the slots. */
+  def encode(state: AgentState, weight: Double, maxAction: Double, missingValueFeature: Boolean = false): Array[Float] =
     val scale = localScale(state)
-    (egoFeatures(state, weight, scale) ++ neighbourSlots(state, scale, maxAction).flatten).toArray
+    val missingValue = if missingValueFeature then Seq(MissingValue.feature(state)) else Seq.empty
+    (egoFeatures(state, weight, scale) ++ missingValue ++ neighbourSlots(state, scale, maxAction).flatten).toArray
 
   private def egoFeatures(state: AgentState, weight: Double, scale: Double): Seq[Float] =
     val trends = OwnTrends.recent(state, SpatialTemporal.TrendFeatures)

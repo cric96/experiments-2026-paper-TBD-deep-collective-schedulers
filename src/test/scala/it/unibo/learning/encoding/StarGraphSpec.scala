@@ -23,7 +23,16 @@ class StarGraphSpec extends AnyFlatSpec with Matchers:
     fixtures.map(StarGraph.encode(_, 0.8, 5.0).length).distinct shouldBe Seq(StarGraph.TotalDim)
   }
 
+  it should "insert the missing-value feature after the ego features when asked" in
+    fixtures.foreach { state =>
+      val plain = StarGraph.encode(state, 0.8, 5.0)
+      val flagged = StarGraph.encode(state, 0.8, 5.0, missingValueFeature = true)
+      flagged.toSeq shouldBe
+        ((plain.take(StarGraph.SelfDim) :+ MissingValue.feature(state)) ++ plain.drop(StarGraph.SelfDim)).toSeq
+    }
+
   "The nearest neighbours" should "exclude the node itself and be sorted by distance" in {
     stableBackbone.latestSnapshot.map(StarGraph.nearestNeighbours(stableBackbone, _).map(_._1)) shouldBe
       Some(List(0, 2))
   }
+end StarGraphSpec

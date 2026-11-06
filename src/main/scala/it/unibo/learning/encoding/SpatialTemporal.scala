@@ -33,7 +33,12 @@ object SpatialTemporal:
     val ShortestNeighbourPeriod: Int = 7
     val Beta: Int = 8
 
-  def encode(state: AgentState, weight: Double, maxAction: Double): Array[Float] =
+  /** The features above, followed by the [[MissingValue]] feature if `missingValueFeature`. */
+  def encode(state: AgentState, weight: Double, maxAction: Double, missingValueFeature: Boolean = false): Array[Float] =
+    val features = baseFeatures(state, weight, maxAction)
+    if missingValueFeature then features :+ MissingValue.feature(state) else features
+
+  private def baseFeatures(state: AgentState, weight: Double, maxAction: Double): Array[Float] =
     val scale = localScale(state)
     val trends = OwnTrends.recent(state, TrendFeatures)
     val change = neighbourhoodChange(state, scale)
