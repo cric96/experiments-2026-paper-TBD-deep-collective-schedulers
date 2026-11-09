@@ -61,7 +61,8 @@ object Relabelling:
     Seq.fill(OwnWeightRepetitions)(ownWeight) ++ counterfactual
 
   /** Relabels every step of `trajectory` (encoded with `encode`, whose β feature is at `betaFeatureIndex`) for every
-    * target weight of `scale`; the last step is terminal and points to itself.
+    * target weight of `scale`; the last step is terminal and points to itself. The mobile steps are conditioned on
+    * `betaFeature` (the raw β of the mobile encoding by default), the others on the feature of `scale`.
     */
   def relabel(
       trajectory: Trajectory,
@@ -70,10 +71,11 @@ object Relabelling:
       encode: AgentState => Array[Float],
       betaFeatureIndex: Int,
       mobile: Boolean = false,
-      scale: TradeOff.BetaScale = TradeOff.BetaScale.Ratio
+      scale: TradeOff.BetaScale = TradeOff.BetaScale.Ratio,
+      betaFeature: Double => Float = _.toFloat
   ): Seq[RelabelledStep] =
     val weights = targetWeights(ownWeight, scale.counterfactualWeights)
-    if mobile then relabelMobile(trajectory, weights, gamma, encode, betaFeatureIndex)
+    if mobile then relabelMobile(trajectory, weights, gamma, encode, DeferredFeature(betaFeatureIndex, betaFeature))
     else relabelLegacy(trajectory, weights, gamma, encode, betaFeatureIndex, scale)
 
   private def relabelLegacy(
@@ -101,7 +103,7 @@ object Relabelling:
       weights: Seq[Double],
       gamma: Double,
       encode: AgentState => Array[Float],
-      betaFeatureIndex: Int
+      betaFeature: DeferredFeature
   ): Seq[RelabelledStep] =
     trajectory.flatMap { step =>
       val outcome =
@@ -120,11 +122,15 @@ object Relabelling:
             math.pow(gamma, outcome.duration).toFloat,
             Some(cost),
             outcome.energy,
-            Some(DeferredBeta(betaFeatureIndex, beta.toFloat))
+            Some(betaFeature.of(beta))
           )
         }
       }
     }
+
+  /** Where the β feature goes and how a β is encoded in it. */
+  final private case class DeferredFeature(index: Int, feature: Double => Float):
+    def of(beta: Double): DeferredBeta = DeferredBeta(index, feature(beta))
 
   private def withBetaFeature(
       features: Array[Float],

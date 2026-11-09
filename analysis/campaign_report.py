@@ -11,8 +11,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from experiments.campaign import BASELINES, FOCUS_BETA, LEARNED
-from .figures.campaign import ARCHITECTURE_LABELS, BASELINE_METHODS, PROGRAMS, VARIANT_LABELS, scenario_label
+from experiments.campaign import BASELINES, LEARNED, focus_of
+from .campaign import at_focus
+from .figures.campaign import ARCHITECTURE_LABELS, BASELINE_METHODS, VARIANT_LABELS, baseline_label, scenario_label
 
 PHASE_ORDER = ("whole", "bootstrap", "quiet", "event", "after")
 # Phases where the values change: elsewhere every schedule holds exact values and the gain is undefined.
@@ -37,13 +38,13 @@ def interval(row: pd.Series, value: str, scale: float = 100.0, digits: int = 0) 
 
 def method_label(variant: str, algorithm: int) -> str:
     if algorithm in BASELINES:
-        return BASELINE_METHODS[algorithm].short
+        return baseline_label(BASELINE_METHODS[algorithm], variant)
     return f"{ARCHITECTURE_LABELS[algorithm]}, {VARIANT_LABELS.get(variant, variant).lower()}"
 
 
 def gains_table(summary: pd.DataFrame, phase: str = "whole") -> str:
     """Gain (%) at the focus beta, one row per method and one column per scenario."""
-    rows = summary[(summary.phase == phase) & (summary.beta == FOCUS_BETA)].copy()
+    rows = at_focus(summary[summary.phase == phase]).copy()
     rows["method"] = [method_label(v, a) for v, a in zip(rows.variant, rows.algorithm)]
     rows["scenario"] = [scenario_label(f, p, n, s) for f, p, n, s in zip(rows.family, rows.program, rows.nodes, rows.speed)]
     rows["cell"] = [interval(row, "gain") for _, row in rows.iterrows()]
@@ -53,7 +54,7 @@ def gains_table(summary: pd.DataFrame, phase: str = "whole") -> str:
 
 def phase_table(summary: pd.DataFrame, where: dict) -> str:
     """Gain (%) where it is defined, then the rounds per node per second of every phase."""
-    rows = summary[(summary.beta == FOCUS_BETA) & summary.algorithm.isin(LEARNED)]
+    rows = at_focus(summary[summary.algorithm.isin(LEARNED)])
     for column, value in where.items():
         rows = rows[rows[column] == value]
     rows = rows.assign(method=[method_label(v, a) for v, a in zip(rows.variant, rows.algorithm)],
@@ -70,13 +71,20 @@ def phase_table(summary: pd.DataFrame, where: dict) -> str:
 
 
 def variability_table(variability: pd.DataFrame) -> str:
-    rows = variability[(variability.beta == FOCUS_BETA) & variability.algorithm.isin(LEARNED)
-                       & (variability.phase == "whole")]
+    rows = at_focus(variability[variability.algorithm.isin(LEARNED) & (variability.phase == "whole")])
     rows = rows.assign(method=[method_label(v, a) for v, a in zip(rows.variant, rows.algorithm)],
                        scenario=[scenario_label(f, p, n, s) for f, p, n, s in
                                  zip(rows.family, rows.program, rows.nodes, rows.speed)])
     columns = ["scenario", "method", "mean", "withinRun", "acrossTopologies", "acrossPolicies", "policyCV"]
     return markdown(rows[columns].sort_values(["scenario", "method"]), index=False)
+
+
+def focus_note(variants) -> str:
+    """The focus beta of every variant, from the highest."""
+    groups = {}
+    for variant in sorted(set(variants)):
+        groups.setdefault(focus_of(variant), []).append(f"`{variant}`")
+    return "; ".join(f"β = {beta:g} ({', '.join(names)})" for beta, names in sorted(groups.items(), reverse=True))
 
 
 def report(home: Path) -> str:
@@ -86,7 +94,8 @@ def report(home: Path) -> str:
     sections = [
         f"# Campaign `{home.name}`",
         "Gains are error reductions (%) w.r.t. the fixed-period frontier at the same rounds, mean "
-        "[crossed 95% interval] over (training seed, evaluation seed) pairs, β = 0.95.",
+        "[crossed 95% interval] over (training seed, evaluation seed) pairs, every method at the focus β of its "
+        f"scale: {focus_note(summary.variant)}.",
         "## Whole episode", gains_table(summary),
         "## Phases of the static episode (source switch at 100 s)",
         phase_table(summary, dict(family="static")),

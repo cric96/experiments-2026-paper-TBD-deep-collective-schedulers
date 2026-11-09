@@ -10,8 +10,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from .pareto import frontier_value_at
-from experiments.campaign import (validate, CORE, DYNAMIC, FAMILIES, FIXED, FOCUS_BETA, LEARNED, PROGRAMS, STATIC,
-                                  TRAIN_SEEDS)
+from experiments.campaign import (validate, CORE, DYNAMIC, FAMILIES, FIXED, LEARNED, PROGRAMS, STATIC, TRAIN_SEEDS,
+                                  focus_of)
 
 PAIR = ['training_seed', 'evaluation_seed']
 SCENARIO = ['family', 'program', 'nodes', 'speed', 'phase']
@@ -81,6 +81,11 @@ def gains(episodes):
     return pd.DataFrame(records)
 
 
+def at_focus(frame):
+    """The rows of every variant at its focus beta (the shared controls at FOCUS_BETA)."""
+    return frame[frame.beta == frame.variant.map(focus_of)]
+
+
 def crossed_interval(frame, value, repetitions=2000):
     """Resample training seeds and topology seeds separately, preserving paired differences."""
     grid = frame.pivot(index='training_seed', columns='evaluation_seed', values=value).to_numpy()
@@ -98,8 +103,8 @@ def crossed_interval(frame, value, repetitions=2000):
 
 def primary_scores(data):
     """Static gain and zero-shot gain on the other programs at the training population, at the focus beta."""
-    whole = data[(data.phase == 'whole') & data.family.isin(['static', 'generalization']) & data.algorithm.isin(LEARNED)
-                 & (data.nodes == 100) & (data.beta == FOCUS_BETA)]
+    whole = at_focus(data[(data.phase == 'whole') & data.family.isin(['static', 'generalization'])
+                          & data.algorithm.isin(LEARNED) & (data.nodes == 100)])
     # Require complete support; undefined frontier gains cannot quietly change the selection population.
     groups = ['variant', 'algorithm'] + PAIR + ['family']
     scores = whole.groupby(groups).gain.agg(lambda values: values.mean() if values.notna().all() else np.nan)
@@ -177,7 +182,7 @@ def write_tables(home, episodes, data):
 
 def final_variants(data):
     """The final method of each architecture: the variant of its beta study (selected on validation)."""
-    swept = data[(data.beta != FOCUS_BETA) & data.algorithm.isin(LEARNED)]
+    swept = data[(data.beta != data.variant.map(focus_of)) & data.algorithm.isin(LEARNED)]
     return {algorithm: next(iter(swept[swept.algorithm == algorithm].variant.unique()), 'current')
             for algorithm in LEARNED}
 
@@ -188,23 +193,35 @@ def draw_validation(data, out):
     figures.ablation_figure(data, out / 'static', groups, 'validation_ablation')
 
 
-def draw_test(home, episodes, data, out):
+def draw_test(home, episodes, data, out, controls=None):
+    """The test figures, comparing the final methods with the reactive baselines and with the `controls` (by default
+    the current and the legacy objective)."""
     from .figures import campaign as figures
     from .campaign_snapshots import draw
     from .campaign_paper import draw as draw_paper
+    controls = figures.CONTROLS if controls is None else tuple(controls)
     final = final_variants(data)
+    baselines = figures.reactive_variant(data.variant, final)
     figures.family_figure(episodes, data, out / 'static', 'static_tradeoff', [STATIC],
-                          ['Gradient, 100 nodes, source switch at 100 s'], final)
+                          ['Gradient, 100 nodes, source switch at 100 s'], final, baselines, controls)
     figures.family_figure(episodes, data, out / 'dynamic', 'dynamic_tradeoff', DYNAMIC,
-                          [f'Half of the nodes move at {speed:g} m/s (100–150 s)' for *_, speed in DYNAMIC], final)
+                          [f'Half of the nodes move at {speed:g} m/s (100–150 s)' for *_, speed in DYNAMIC], final,
+                          baselines, controls)
     figures.family_figure(episodes, data, out / 'generalization', 'programs_tradeoff', PROGRAMS,
                           [f'{figures.PROGRAMS[program]}, 100 nodes (zero-shot)' for _, program, _, _ in PROGRAMS],
-                          final)
-    figures.generalization_figure(data, out / 'generalization', final)
-    figures.improvement_figure(data, out / 'generalization', final)
-    figures.beta_figure(episodes, out / 'beta-study', final, CORE)
+                          final, baselines, controls)
+    figures.generalization_figure(data, out / 'generalization', final, baselines)
+    figures.advantage_figure(data, out / 'generalization', final, baselines)
+    figures.frontier_gains_figure(data, out / 'generalization', final, CORE, baselines)
+    if not figures.untuned_points(baselines):
+        from .figures.advantage import advantage_3d_figure, advantage_map_figure
+        advantage_3d_figure(data, out / 'generalization', final, CORE, baselines)
+        advantage_map_figure(data, out / 'generalization', final, CORE, baselines)
+    if 'current' in controls:
+        figures.improvement_figure(data, out / 'generalization', final)
+    figures.beta_figure(episodes, out / 'beta-study', final, CORE, baselines)
     draw(home, out, final[LEARNED[0]])
-    draw_paper(home, out, final)
+    draw_paper(home, out, final, controls)
 
 
 def main():
@@ -213,6 +230,9 @@ def main():
     parser.add_argument('--with', dest='others', type=Path, nargs='*', default=[],
                         help='Further campaign folders of the same split (e.g. a second round of variants)')
     parser.add_argument('--out', type=Path, default=Path('charts'))
+    parser.add_argument('--controls', nargs='*', default=None,
+                        help='Controls drawn next to the final methods in the test figures (default: current and '
+                             'legacy; none when the option has no value)')
     args = parser.parse_args()
     from . import style
     style.apply()
@@ -228,7 +248,7 @@ def main():
     if validation:
         draw_validation(data, args.out)
     else:
-        draw_test(args.home, episodes, data, args.out)
+        draw_test(args.home, episodes, data, args.out, args.controls)
 
 
 if __name__ == '__main__':

@@ -85,4 +85,14 @@ class RelabellingSpec extends AnyFlatSpec with Matchers:
       copy.conditionedNextState.toSeq shouldBe Seq(stableBackbone.me.toFloat, copy.beta.toFloat)
     }
   }
+
+  it should "condition the features on the β feature of the learner's encoding" in {
+    val outcome = MobileOutcome(2.0, Map(0.0 -> 0.3), stableBackbone, terminal = false)
+    val step = Step(sourceMovingTowardsMe, actionIndex = -1, action = 2.0, reward = 0.0, Some(outcome))
+    val scale = TradeOff.BetaScale.FullRange
+    val mobile =
+      Relabelling.relabel(Seq(step), ownWeight, gamma, encode, betaIndex, mobile = true, scale, scale.feature)
+    mobile.map(_.beta).distinct shouldBe (ownWeight +: scale.counterfactualWeights).distinct
+    mobile.foreach(copy => copy.conditionedState(betaIndex) shouldBe scale.feature(copy.beta))
+  }
 end RelabellingSpec

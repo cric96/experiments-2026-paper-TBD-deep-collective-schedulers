@@ -27,6 +27,9 @@ DISTANCE_BINS_M = np.linspace(0.0, 480.0, 25)
 ZONE_RADIUS_M = 140.0
 ARROW_SHRINK = 0.72  # attention arrows stop short of the neighbour
 ORBIT_LABEL_TIMES_S = (106.0, 112.0, 120.0, 128.0)
+# A time label is left out when its point is closer than this (a fraction of the ranges of the trajectory) to the
+# steady state or to a labelled point: the labels would overlap.
+ORBIT_LABEL_SPACING = 0.12
 
 
 @dataclass
@@ -142,6 +145,21 @@ def gnn_attention_filmstrip(data: Dataset, out: Path) -> None:
     style.save(fig, out, "gnn_attention_filmstrip")
 
 
+def labelled_times(orbit: pd.DataFrame, steady: tuple[float, float]) -> list[float]:
+    """The times of the trajectory nearest to ORBIT_LABEL_TIMES_S whose points stand apart from the steady state and
+    from the points labelled before them: a trajectory back at the steady state needs no time label."""
+    spans = (np.ptp(orbit.pc1), np.ptp(orbit.pc2))
+    placed, times = [steady], []
+    for target in ORBIT_LABEL_TIMES_S:
+        nearest = orbit.index[np.argmin(np.abs(orbit.index - target))]
+        point = (orbit.pc1[nearest], orbit.pc2[nearest])
+        if all(np.hypot((point[0] - x) / spans[0], (point[1] - y) / spans[1]) >= ORBIT_LABEL_SPACING
+               for x, y in placed):
+            placed.append(point)
+            times.append(nearest)
+    return times
+
+
 def gnn_latent_dynamics(data: Dataset, out: Path) -> None:
     """Space-time diagram with the fitted wave front, PC1 per zone, and the network's latent orbit."""
     frame = load_embeddings(data)
@@ -217,11 +235,11 @@ def gnn_latent_dynamics(data: Dataset, out: Path) -> None:
     points = orbit_ax.scatter(
         orbit.pc1, orbit.pc2, c=orbit.nextWakeUp, cmap=style.SEQUENTIAL, s=10, zorder=2, linewidths=0
     )
-    for t in ORBIT_LABEL_TIMES_S:
-        nearest = orbit.index[np.argmin(np.abs(orbit.index - t))]
-        style.direct_label(orbit_ax, orbit.pc1[nearest], orbit.pc2[nearest], f"{nearest:g} s", dx=3, dy=3, fontsize=5.5)
     steady = orbit.loc[orbit.index <= config.SOURCE_SWITCH_S]
-    style.direct_label(orbit_ax, steady.pc1.mean(), steady.pc2.mean(), "steady state", dx=2, dy=9, fontsize=5.5)
+    steady_point = (steady.pc1.mean(), steady.pc2.mean())
+    for nearest in labelled_times(orbit, steady_point):
+        style.direct_label(orbit_ax, orbit.pc1[nearest], orbit.pc2[nearest], f"{nearest:g} s", dx=3, dy=3, fontsize=5.5)
+    style.direct_label(orbit_ax, *steady_point, "steady state", dx=2, dy=9, fontsize=5.5)
     orbit_ax.set_xlabel("Network-mean PC1")
     orbit_ax.set_ylabel("Network-mean PC2")
     bar = fig.colorbar(points, ax=orbit_ax, fraction=0.05, pad=0.02)

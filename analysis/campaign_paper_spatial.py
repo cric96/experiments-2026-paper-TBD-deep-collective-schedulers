@@ -17,15 +17,16 @@ import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
 
-from experiments.campaign import FOCUS_BETA, LEARNED, TRAIN_SEEDS
+from experiments.campaign import LEARNED, TRAIN_SEEDS
 from . import style
-from .campaign_snapshots import EMBEDDINGS, INSPECTED_EVALUATION_SEED
+from .campaign_snapshots import EMBEDDINGS, INSPECTED_EVALUATION_SEED, SNAPSHOT_BETA
 from .figures import spatial
 from .campaign_paper import architecture
 from .figures.common import method_band
 
-SNAPSHOTS = f"spatial_snapshots_weight-{FOCUS_BETA}.csv"
-EDGES = f"spatial_edges_weight-{FOCUS_BETA}.csv"
+# The snapshots and the communication edges of the inspected MLP run, as the paper's figure functions read them.
+PAPER_SNAPSHOTS = f"spatial_snapshots_weight-{SNAPSHOT_BETA}.csv"
+PAPER_EDGES = f"spatial_edges_weight-{SNAPSHOT_BETA}.csv"
 ZOOM_S = (85.0, 165.0)
 REFERENCE_PERIODS = (3.0, 5.0)
 GIF = "spatial_wave_animation.gif"
@@ -35,15 +36,15 @@ def inspected_files(home: Path, jobs: list[dict], finals: dict[int, str], algori
                     training_seed: int) -> dict[str, Path]:
     """The snapshot files of the static run of an architecture's final variant on the inspected topology."""
     job = next(job for job in jobs if job["family"] == "static" and job["algorithm"] == algorithm
-               and job["variant"] == finals[algorithm] and job["beta"] == FOCUS_BETA
+               and job["variant"] == finals[algorithm] and job["beta"] == SNAPSHOT_BETA
                and job["training_seed"] == training_seed and job["evaluation_seed"] == INSPECTED_EVALUATION_SEED)
     return {path.name: path for path in (home / "exports" / job["key"]).rglob("*.csv") if "spatial" in path.parts}
 
 
-def shim(folder: Path, snapshots: Path, edges: Path) -> SimpleNamespace:
-    """A folder laid out as the paper's ``spatial`` exports, for the paper's figure functions."""
-    (folder / SNAPSHOTS).symlink_to(snapshots.resolve())
-    (folder / EDGES).symlink_to(edges.resolve())
+def shim(folder: Path, snapshot_file: Path, edge_file: Path) -> SimpleNamespace:
+    """A folder laid out as the paper's ``spatial`` exports (at beta 0.95), for the paper's figure functions."""
+    (folder / PAPER_SNAPSHOTS).symlink_to(snapshot_file.resolve())
+    (folder / PAPER_EDGES).symlink_to(edge_file.resolve())
     return SimpleNamespace(spatial_dir=folder)
 
 
@@ -53,12 +54,12 @@ def spatial_figures(home: Path, jobs: list[dict], finals: dict[int, str], out: P
     mlp = inspected_files(home, jobs, finals, LEARNED[1], seed)
     gnn = inspected_files(home, jobs, finals, LEARNED[0], seed)
     with tempfile.TemporaryDirectory() as folder:
-        data = shim(Path(folder), mlp[SNAPSHOTS], mlp[EDGES])
+        data = shim(Path(folder), mlp[PAPER_SNAPSHOTS], mlp[PAPER_EDGES])
         spatial.spatial_filmstrip(data, out / "filmstrip")
         spatial.spatial_computation(data, out / "static")
         spatial.spatial_wave_animation(data, out / "filmstrip")
     with tempfile.TemporaryDirectory() as folder:
-        data = shim(Path(folder), gnn[EMBEDDINGS], mlp[EDGES])
+        data = shim(Path(folder), gnn[EMBEDDINGS], mlp[PAPER_EDGES])
         drawn = Path(folder) / "drawn"
         spatial.spatial_filmstrip(data, drawn)
         spatial.spatial_wave_animation(data, drawn)
@@ -76,7 +77,7 @@ def network_means(path: Path) -> pd.DataFrame:
 
 
 def seed_traces(home: Path, jobs: list[dict], finals: dict[int, str], algorithm: int) -> dict[int, pd.DataFrame]:
-    name = EMBEDDINGS if algorithm == LEARNED[0] else SNAPSHOTS
+    name = EMBEDDINGS if algorithm == LEARNED[0] else PAPER_SNAPSHOTS
     return {seed: network_means(inspected_files(home, jobs, finals, algorithm, seed)[name])
             for seed in TRAIN_SEEDS["test"]}
 

@@ -147,6 +147,31 @@ class MobileSimulationSpec extends AnyFlatSpec with Matchers:
     run(1, variant = variant)
   }
 
+  it should "train the original encoding with the full-range beta on the error of the neighbourhood" in {
+    val variant = Map(
+      "mobileEncoding" -> 0,
+      "missingValue" -> 1,
+      "betaScale" -> "FullRange",
+      "costSignal" -> "Neighbourhood",
+      "costReferenceTime" -> 0.25,
+      "trainingTolerances" -> "0.0",
+      "completeReplay" -> 1
+    )
+    run(0, variant = variant)
+    run(1, variant = variant)
+  }
+
+  it should "run Trickle and the gradual controller within the configured periods" in {
+    val period = 1.0
+    val tolerance = 0.15
+    Seq(11, 12).foreach { algorithm =>
+      val (config, _) = run(algorithm, variant = Map("baselineMinPeriod" -> period, "baselineMaxPeriod" -> period))
+      rows(config.directory, s"${config.runName}_episodes.csv").foreach { episode =>
+        episode(6).toDouble shouldBe (1.0 / period) +- tolerance
+      }
+    }
+  }
+
   it should "move the nodes between waypoints" in {
     val waypoint = Map("mobilityModel" -> "Waypoint", "speed" -> 2.0)
     val (_, positions) = run(3, variant = waypoint, scenario = _.copy(model = MobilityModel.Waypoint, speed = 2.0))

@@ -20,8 +20,13 @@ variables:
   exportDirectory: { type: ArbitraryVariable, parameters: ["build/exports/mobility", ["build/exports/mobility"]] }
   # Variants of the training and of the scenario; the defaults are the original mobile experiment.
   completeReplay: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
-  costSignal: { type: ArbitraryVariable, parameters: ["Error", ["Error", "Staleness"]] }
+  # What the decisions of the learners 0 and 1 pay for while they train (it.unibo.mobility.CostSignal).
+  costSignal: { type: ArbitraryVariable, parameters: ["Error", ["Error", "Staleness", "Neighbourhood"]] }
   lossScale: { type: ArbitraryVariable, parameters: [500.0, [500.0, 50.0]] }
+  # Seconds for which holding the whole loss scale costs a decision as much as a round at beta 0.5
+  # (MobilityConfig.costReferenceTime), and the tolerances (m) the training costs are measured with (comma-separated).
+  costReferenceTime: { type: ArbitraryVariable, parameters: [1.0, [1.0, 0.25]] }
+  trainingTolerances: { type: ArbitraryVariable, parameters: ["0.0,5.0,15.0", ["0.0,5.0,15.0", "0.0"]] }
   mobilityModel: { type: ArbitraryVariable, parameters: ["Brownian", ["Brownian", "Waypoint"]] }
   speed: { type: ArbitraryVariable, parameters: [1.0, [0.0, 1.0, 2.0]] }
   warmStart: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
@@ -33,15 +38,21 @@ variables:
   steadyState: { type: ArbitraryVariable, parameters: [0.06, [0.06]] }
   intensityGain: { type: ArbitraryVariable, parameters: [8.0, [8.0]] }
   missingValueIntensity: { type: ArbitraryVariable, parameters: [0.0, [0.0]] }
-  # Whether the original learners see if a node has no value yet (one more feature).
+  # Whether the learners with the original encoding (8, 9; 0, 1 with mobileEncoding 0) see if a node has no value yet
+  # (one more feature).
   missingValue: { type: ArbitraryVariable, parameters: [0, [0]] }
   # How beta weights the objectives of the original learners (TradeOff.BetaScale): Ratio (original), Linear or
-  # FullRange.
+  # FullRange. The learners trained on the measured costs (0, 1) take from it the betas they are relabelled for and,
+  # with mobileEncoding 0, the feature of beta.
   betaScale: { type: ArbitraryVariable, parameters: ["Ratio", ["Ratio"]] }
   # How beta tunes Trickle and the gradual controller (ordinal of BaselineTuning): 0 untuned (0.5-5 s); 1 after a
   # change they fall back to the best period of an urgent node on the linear scale (5 s at beta 0, 0.5 s at beta 1);
   # 2 they move between the best periods of an unstable and of a stable node under the reward shape.
   tunedBaselines: { type: ArbitraryVariable, parameters: [0, [0]] }
+  # The range of their periods (s): untuned they move within it (Trickle from the shortest after a change to the
+  # longest), tuned they take their periods within it.
+  baselineMinPeriod: { type: ArbitraryVariable, parameters: [0.5, [0.5]] }
+  baselineMaxPeriod: { type: ArbitraryVariable, parameters: [5.0, [5.0]] }
   # What happens halfway through the evaluation episodes, and the cycle of the training ones (comma-separated).
   episodeEvent: { type: ArbitraryVariable, parameters: ["SourceSwitch", ["SourceSwitch", "RegionStartsMoving", "SourceSwitchWhileRegionMoves"]] }
   trainingEvents: { type: ArbitraryVariable, parameters: ["SourceSwitch", ["SourceSwitch", "SourceSwitch,RegionStartsMoving,RegionStartsMoving", "SourceSwitchWhileRegionMoves"]] }
@@ -79,7 +90,9 @@ variables:
         evaluationNodes = evaluationNodes.as[Number].intValue(),
         targetProgram = it.unibo.scafi.BuildingBlock.fromMolecule(targetProgram.as[Number]),
         balanceScenarios = balanceScenarios.as[Number].intValue() != 0,
-        trainingSpeeds = trainingSpeeds.as[String].split(",").toSeq.map(_.toDouble)
+        trainingSpeeds = trainingSpeeds.as[String].split(",").toSeq.map(_.toDouble),
+        trainingTolerances = trainingTolerances.as[String].split(",").toSeq.map(_.toDouble),
+        costReferenceTime = costReferenceTime.as[Double]
       )
     language: scala
   environmentBox: &environmentBox
@@ -102,11 +115,11 @@ variables:
       val encoding = mobileEncoding.as[Number].intValue() != 0;
       val multiplier = finalMultiplier.as[Number].intValue();
       val shape = it.unibo.learning.TradeOff.RewardShape(steadyState.as[Double], intensityGain.as[Double], missingValueIntensity.as[Double], it.unibo.learning.TradeOff.BetaScale.valueOf(betaScale.as[String]));
-      val reactive = it.unibo.learning.agents.BaselineTuning.fromOrdinal(tunedBaselines.as[Number].intValue()).periods(beta, shape, 0.5, 5.0);
+      val reactive = it.unibo.learning.agents.BaselineTuning.fromOrdinal(tunedBaselines.as[Number].intValue()).periods(beta, shape, baselineMinPeriod.as[Double], baselineMaxPeriod.as[Double]);
       val missing = missingValue.as[Number].intValue() != 0;
       algoId.as[Number].intValue() match {
-        case 0 => new OfflineLearnerGNN(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, mobile = true, replayCapacity = capacity, mobileFeatures = features, periodExploration = exploration, mobileEncoding = encoding, finalTrainingMultiplier = (if (multiplier > 0) multiplier else 2))
-        case 1 => new OfflineLearnerContinuous(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, mobile = true, replayCapacity = capacity, mobileFeatures = features, periodExploration = exploration, mobileEncoding = encoding, finalTrainingMultiplier = (if (multiplier > 0) multiplier else 3))
+        case 0 => new OfflineLearnerGNN(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, mobile = true, replayCapacity = capacity, mobileFeatures = features, periodExploration = exploration, mobileEncoding = encoding, finalTrainingMultiplier = (if (multiplier > 0) multiplier else 2), rewardShape = shape, missingValueFeature = missing)
+        case 1 => new OfflineLearnerContinuous(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, mobile = true, replayCapacity = capacity, mobileFeatures = features, periodExploration = exploration, mobileEncoding = encoding, finalTrainingMultiplier = (if (multiplier > 0) multiplier else 3), rewardShape = shape, missingValueFeature = missing)
         case 2 => new HeuristicAdaptiveAgent(Seq(0.5, 1.0, 2.0, 3.0, 4.0, 5.0), beta)
         case 8 => new OfflineLearnerContinuous(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, inspectionEnabled = false, rewardShape = shape, missingValueFeature = missing)
         case 9 => new OfflineLearnerGNN(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, rewardShape = shape, missingValueFeature = missing)

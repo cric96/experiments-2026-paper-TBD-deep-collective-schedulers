@@ -12,9 +12,13 @@ from pathlib import Path
 import pandas as pd
 
 from . import style
-from experiments.campaign import FOCUS_BETA, TRAIN_SEEDS
+from experiments.campaign import TRAIN_SEEDS
 
 INSPECTED_EVALUATION_SEED = 202
+# The beta of the inspected runs, whatever the focus of their scale: the simulator records the attention and the
+# embeddings of the GNN only at this beta (FinalEpisodeSnapshots.AttentionWeight), and the snapshots of both
+# architectures are taken at the same beta so that their figures compare like with like.
+SNAPSHOT_BETA = 0.95
 EMBEDDINGS = "gnn_spatiotemporal_embeddings.csv"
 PROGRAMS = {0: "Gradient", 1: "Hop count", 2: "Broadcast", 3: "Collect", 4: "Election"}
 # Shortest and longest period of the action space (s): the share of decisions at a bound says whether it binds.
@@ -25,7 +29,7 @@ def inspected_runs(home: Path, final: str) -> list[tuple[dict, pd.DataFrame]]:
     manifest = json.loads((home / "manifest.json").read_text())
     selected = [job for job in manifest if job["evaluation_seed"] == INSPECTED_EVALUATION_SEED
                 and job["training_seed"] == TRAIN_SEEDS["test"][0] and job["variant"] == final
-                and job["algorithm"] == 0 and job["beta"] == FOCUS_BETA and job["nodes"] == 100]
+                and job["algorithm"] == 0 and job["beta"] == SNAPSHOT_BETA and job["nodes"] == 100]
     runs = []
     for job in selected:
         paths = list((home / "exports" / job["key"]).rglob(EMBEDDINGS))

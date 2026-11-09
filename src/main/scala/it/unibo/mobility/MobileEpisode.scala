@@ -68,7 +68,10 @@ final class MobileEpisode(config: MobilityConfig, val index: Int, val start: Dou
       val costs = config.tolerances
         .map(tolerance => tolerance -> (costIntegrals(id).cost(tolerance) - previous.costs(tolerance)))
         .toMap
-      val trainingCosts = costs.filter { case (tolerance, _) => config.trainingTolerances.contains(tolerance) }
+      val trainingCosts = costs.collect {
+        case (tolerance, cost) if config.trainingTolerances.contains(tolerance) =>
+          tolerance -> cost / config.costReferenceTime
+      }
       val outcome = MobileOutcome(now - previous.time, trainingCosts, nextState, terminal, MobileObjective.RoundCost)
       val reward = MobileObjective.reward(costs(config.toleranceAt(index)), outcome.energy, config.beta)
       val step = Step(previous.state, -1, previous.period, reward, Some(outcome))

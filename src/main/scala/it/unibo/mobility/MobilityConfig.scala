@@ -3,10 +3,12 @@ package it.unibo.mobility
 import java.io.File
 
 /** Parameters of the separate mobile-gradient experiment. Diffusion is measured in m²/s, speed in m/s, tolerance and
-  * loss scale in metres. `costSignal` and `lossScale` shape only the training costs: the exported metrics always report
-  * the held error at the encoding scale. `event` happens halfway through the evaluation episodes, `trainingEvents`
-  * cycle through the training ones; `movingShare` is the share of the nodes of a region that moves, for
-  * `motionDuration` seconds once a region starts moving halfway (for ever by default).
+  * loss scale in metres. `costSignal`, `lossScale` and `costReferenceTime` shape only the training costs: the exported
+  * metrics always report the held error at the encoding scale. A decision pays its integrated loss in units of
+  * `costReferenceTime` seconds: holding the whole loss scale that long costs as much as a round at β 0.5. `event`
+  * happens halfway through the evaluation episodes, `trainingEvents` cycle through the training ones; `movingShare` is
+  * the share of the nodes of a region that moves, for `motionDuration` seconds once a region starts moving halfway (for
+  * ever by default).
   */
 final case class MobilityConfig(
     seed: Int,
@@ -37,7 +39,8 @@ final case class MobilityConfig(
     evaluationSeed: Option[Int] = None,
     evaluationNodes: Int = 100,
     targetProgram: it.unibo.scafi.BuildingBlock = it.unibo.scafi.BuildingBlock.Gradient,
-    balanceScenarios: Boolean = false
+    balanceScenarios: Boolean = false,
+    costReferenceTime: Double = MobileObjective.ReferenceTime
 ):
   require(diffusion >= 0.0 && diffusion.isFinite && tolerance >= 0.0 && tolerance.isFinite)
   require(beta >= 0.0 && beta <= 1.0 && MobilityConfig.Algorithms.contains(algorithm))
@@ -59,6 +62,7 @@ final case class MobilityConfig(
   require(trainingDiffusions.nonEmpty && trainingDiffusions.forall(value => value >= 0.0 && value.isFinite))
   require(trainingTolerances.nonEmpty && trainingTolerances.forall(value => value >= 0.0 && value.isFinite))
   require(lossScale > 0.0 && lossScale.isFinite && speed >= 0.0 && speed.isFinite)
+  require(costReferenceTime > 0.0 && costReferenceTime.isFinite)
   require(trainingSpeeds.nonEmpty && trainingSpeeds.forall(value => value >= 0.0 && value.isFinite))
   require(trainingEvents.nonEmpty && movingShare > 0.0 && movingShare <= 1.0 && motionDuration > 0.0)
 

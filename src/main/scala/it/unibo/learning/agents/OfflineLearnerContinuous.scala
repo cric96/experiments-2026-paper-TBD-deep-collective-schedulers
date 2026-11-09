@@ -90,7 +90,7 @@ final class OfflineLearnerContinuous(
   override protected def record(trajectory: Trajectory): Unit =
     Relabelling
       .relabel(trajectory, weight, gamma.toDouble, encodeForOwnWeight, SpatialTemporal.Feature.Beta, mobile,
-        rewardShape.scale)
+        rewardShape.scale, encodedBeta)
       .foreach(relabelled => transitions.add(toTransition(relabelled), relabelled.isUnstable))
 
   private def encodeState(state: AgentState, beta: Double): Array[Float] =
@@ -103,6 +103,10 @@ final class OfflineLearnerContinuous(
       )
 
   private def encodeForOwnWeight(state: AgentState): Array[Float] = encodeState(state, weight)
+
+  /** The β feature of [[encodeState]]: the raw β of the mobile encoding, the feature of the β scale otherwise. */
+  private def encodedBeta(beta: Double): Float =
+    if mobile && mobileEncoding then beta.toFloat else rewardShape.scale.feature(beta)
 
   /** The intensity that shapes the reward of a step (see [[TradeOff.RewardShape]]). */
   private def rewardIntensity(relabelled: RelabelledStep): Double =

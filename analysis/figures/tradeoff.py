@@ -18,33 +18,33 @@ from ..results import FRONTIER_GAINS, fixed_frontier, fixed_runs
 from ..stats import t_interval
 from .common import METRIC_LABELS, ci_of, errorbar, thousands
 
-BETA_POSITIONS = np.arange(len(config.WEIGHTS))
 DODGE = 0.09  # horizontal offset between methods on categorical beta axes
 ANNOTATED_METHOD = TD3  # method whose gain at the focus beta is called out
 PARETO_TICKS = (4000, 5000, 7000, 10000, 15000, 20000)
 
 
-def _beta_axis(ax) -> None:
-    ax.set_xticks(BETA_POSITIONS, [f"{w:g}" for w in config.WEIGHTS])
-    ax.set_xlim(-0.4, len(config.WEIGHTS) - 0.6)
+def _beta_axis(ax, weights=config.WEIGHTS) -> None:
+    ax.set_xticks(np.arange(len(weights)), [f"{w:g}" for w in weights])
+    ax.set_xlim(-0.4, len(weights) - 0.6)
     ax.set_xlabel("Trade-off weight $\\beta$")
 
 
-def tradeoff_vs_beta(data: Dataset, out: Path) -> None:
-    """Rounds, unstable time and error of each learned method as beta grows."""
+def tradeoff_vs_beta(data: Dataset, out: Path, weights=config.WEIGHTS) -> None:
+    """Rounds, unstable time and error of each learned method as beta grows (over `weights`)."""
     metrics = ("ticks", "unstable", "error")
     fig, axes = style.figure("double", 2.0, 1, len(metrics))
     for ax, metric in zip(axes, metrics):
         for index, method in enumerate(data.methods):
             offset = (index - (len(data.methods) - 1) / 2) * DODGE
-            intervals = [ci_of(select(data.evaluation, method.key, weight=w)[metric]) for w in config.WEIGHTS]
+            intervals = [ci_of(select(data.evaluation, method.key, weight=w)[metric]) for w in weights]
             means = np.array([ci.mean for ci in intervals])
             errors = np.array([[ci.mean - ci.low for ci in intervals], [ci.high - ci.mean for ci in intervals]])
-            ax.errorbar(BETA_POSITIONS + offset, means, yerr=errors, elinewidth=0.6, **style.line_style(method))
+            ax.errorbar(np.arange(len(weights)) + offset, means, yerr=errors, elinewidth=0.6,
+                        **style.line_style(method))
         ax.set_ylabel(METRIC_LABELS[metric])
         if metric == "ticks":
             thousands(ax, "y")
-        _beta_axis(ax)
+        _beta_axis(ax, weights)
     style.figure_legend(fig, [style.legend_handle(m) for m in data.methods], ncol=len(data.methods))
     style.save(fig, out, "tradeoff_vs_beta")
 
@@ -123,8 +123,8 @@ def _gain_cell_text(mean: float, low: float, high: float) -> str:
     return f"{mean:.0%}\n[{low:.0%}, {high:.0%}]".replace("-", "\u2212")  # typographic minus
 
 
-def frontier_gains_heatmap(data: Dataset, out: Path) -> None:
-    """Gains over the fixed-period frontier for every (method, beta), with 95 % bootstrap CIs."""
+def frontier_gains_heatmap(data: Dataset, out: Path, weights=config.WEIGHTS) -> None:
+    """Gains over the fixed-period frontier for every (method, beta of `weights`), with 95 % bootstrap CIs."""
     gains = data.gains
     names = ("error_at_ticks", "unstable_at_ticks", "rounds_at_error")
     limit = 0.6
@@ -150,7 +150,7 @@ def frontier_gains_heatmap(data: Dataset, out: Path) -> None:
                 zorder=3,
                 linespacing=1.1,
             )
-        ax.set_xticks(range(len(config.WEIGHTS)), [f"{w:g}" for w in config.WEIGHTS])
+        ax.set_xticks(range(len(weights)), [f"{w:g}" for w in weights])
         ax.set_yticks(range(len(rows)), [m.short for m in data.methods])
         ax.set_xlabel("Trade-off weight $\\beta$")
         ax.set_title(FRONTIER_GAINS[name].capitalize())
@@ -168,9 +168,9 @@ def frontier_gains_heatmap(data: Dataset, out: Path) -> None:
 SUMMARY_PERIODS = (5.0, 3.0, 2.0)  # fixed periods shown next to the learned methods
 
 
-def summary_beta095(data: Dataset, out: Path) -> None:
-    """All four metrics at beta = 0.95: per-seed values (dots) and mean with 95 % CI."""
-    weight = config.FOCUS_WEIGHT
+def summary_beta095(data: Dataset, out: Path, weight: float = config.FOCUS_WEIGHT) -> None:
+    """All four metrics at one beta (0.95 by default, file summary_beta095): per-seed values (dots) and mean with
+    95 % CI."""
     metrics = ("ticks", "unstable", "error", "reward")
     rows: list[tuple[str, str, str, object]] = []  # label, color, marker, runs
     baseline = fixed_runs(data.evaluation, weight)
@@ -206,7 +206,7 @@ def summary_beta095(data: Dataset, out: Path) -> None:
         ax.grid(axis="y", visible=False)
     axes[0].set_yticks(positions, [row[0] for row in rows])
     axes[0].set_ylim(-0.6, len(rows) - 0.4)
-    style.save(fig, out, "summary_beta095")
+    style.save(fig, out, f"summary_beta{weight:g}".replace(".", ""))
 
 
 FIGURES = (tradeoff_vs_beta, pareto_frontiers, frontier_gains_heatmap, summary_beta095)

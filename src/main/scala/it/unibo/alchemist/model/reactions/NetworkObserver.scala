@@ -3,14 +3,15 @@ package it.unibo.alchemist.model.reactions
 import it.unibo.alchemist.Molecules.*
 import it.unibo.alchemist.model.reactions.NetworkObserver.*
 import it.unibo.alchemist.model.{Node, Position}
-import it.unibo.mobility.{CostSignal, MobileEpisode, MobilityConfig, NodeObservation, Staleness}
+import it.unibo.mobility.{CostSignal, MobileEpisode, MobilityConfig, NeighbourhoodError, NodeObservation, Staleness}
 import it.unibo.scafi.Sensors
 
 /** Observes the output of every node after each simulator event and records it in the episode ([[MobileEpisode]]).
   *
   * A simulator event changes at most the output of the node that ran, so at an instant that was already observed on the
-  * same network only the nodes whose output changed, and the neighbours whose staleness it changes, are observed again:
-  * the others would be recorded with an unchanged observation, which adds nothing.
+  * same network only the nodes whose output changed, and the neighbours whose cost it changes (staleness or
+  * neighbourhood error), are observed again: the others would be recorded with an unchanged observation, which adds
+  * nothing.
   */
 final class NetworkObserver[T, P <: Position[P]](network: NetworkView[T, P], config: MobilityConfig):
   private var last: Option[Observation] = None
@@ -32,21 +33,30 @@ final class NetworkObserver[T, P <: Position[P]](network: NetworkView[T, P], con
   private def observeChanges(now: Double, episode: MobileEpisode, previous: Observation, outputs: Outputs): Unit =
     val changed = outputs.keySet.filterNot(id => sameOutput(previous.outputs(id), outputs(id)))
     if changed.nonEmpty then
-      val affected = if chargesStaleness(episode) then changed ++ changed.flatMap(neighbours) else changed
+      val affected =
+        if chargedSignal(episode) == CostSignal.Error then changed else changed ++ changed.flatMap(neighbours)
       val updates = affected.map(id => id -> observationOf(episode, id, outputs)).toMap
       val observations = previous.observations ++ updates
       episode.observeChanges(now, updates, observations)
       last = Some(Observation(now, network.version, outputs, observations))
 
   private def observationOf(episode: MobileEpisode, id: Int, outputs: Outputs): NodeObservation =
-    val expected = network.groundTruths.getOrElse(id, Double.PositiveInfinity)
-    val error = outputs(id).fold(Double.PositiveInfinity)(config.blockAt(episode.index).absoluteError(_, expected))
-    val cost = if chargesStaleness(episode) then stalenessOf(id, outputs) else error
+    val error = errorOf(episode, id, outputs)
+    val cost = chargedSignal(episode) match
+      case CostSignal.Error => error
+      case CostSignal.Staleness => stalenessOf(id, outputs)
+      case CostSignal.Neighbourhood =>
+        NeighbourhoodError.of(error, neighbours(id).map(errorOf(episode, _, outputs)), config.lossScale)
     NodeObservation(error, network.isReachable(id), cost)
 
-  /** Whether the decisions pay for the staleness of the held value rather than for its error ([[CostSignal]]). */
-  private def chargesStaleness(episode: MobileEpisode): Boolean =
-    config.costSignal == CostSignal.Staleness && config.isTraining(episode.index)
+  /** The error of the output held by `id` against the ground truth; unbounded before its first round. */
+  private def errorOf(episode: MobileEpisode, id: Int, outputs: Outputs): Double =
+    val expected = network.groundTruths.getOrElse(id, Double.PositiveInfinity)
+    outputs.get(id).flatten.fold(Double.PositiveInfinity)(config.blockAt(episode.index).absoluteError(_, expected))
+
+  /** What the decisions pay for ([[CostSignal]]): the configured signal in training, the error otherwise. */
+  private def chargedSignal(episode: MobileEpisode): CostSignal =
+    if config.isTraining(episode.index) then config.costSignal else CostSignal.Error
 
   private def neighbours(id: Int): Seq[Int] = network.neighboursOf(id).map(_._1)
 

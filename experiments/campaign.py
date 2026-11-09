@@ -52,6 +52,13 @@ COMMON = dict(warmStart=0, mobilityModel='Waypoint', costSignal='Staleness', los
               errorTolerance=0., exportDirectory='', completeReplay=0)
 # The reward shape of the full-range scale (TradeOff.BetaScale.FullRange), shared by its learners and baselines.
 FULL_RANGE_SHAPE = dict(betaScale='FullRange', steadyState=1.0)
+# Instability gain of the reactive pilot (2026-11-06), four times the default 8 of TradeOff.RewardShape.
+REACTIVE_GAIN = 32.
+# Seconds for which the learners trained on the measured error pay a held normalized error of one as much as a round
+# at beta 0.5 (MobilityConfig.costReferenceTime): on the fixed periods of the static gradient (validation-full-range)
+# the best period then goes from 5 s at beta 0.2 to about 0.7 s at 0.95, as the full-range objective asks of a stable
+# node (5 - 4.5 beta s); with 1 s it would stay at 5 s up to beta 0.5.
+ERROR_REFERENCE_TIME = 0.25
 VARIANTS = {
     'current': dict(unexplainedChange=1, dependants=1),
     'legacy': dict(legacy=True),
@@ -103,25 +110,82 @@ VARIANTS = {
     # 4.1 s (linear) or 2 s (ratio) even at beta 1, so no beta comes near the fast fixed periods; here it asks for
     # 5 - 4.5 beta s (0.7 s at 0.95) and an unstable one divides its odds of sleeping by 1 + 8 I.
     'legacy-full-range': dict(legacy=True, **FULL_RANGE_SHAPE, missingValue=1, missingValueIntensity=1.0),
+    # The same with a stronger instability gain (pilot, 2026-11-06): the learner is lazier than its objective at every
+    # beta and loses the start-up at low beta and the events to the tuned baselines; an unstable node now divides its
+    # odds of sleeping by 1 + 32 I (about 1 s instead of 1.9 s at beta 0.2), a stable one asks for the same period.
+    'legacy-full-range-reactive': dict(legacy=True, **FULL_RANGE_SHAPE, missingValue=1, missingValueIntensity=1.0,
+                                       intensityGain=REACTIVE_GAIN),
+    # The full-range learners (original encoding, missing value, full-range beta) trained on the objective of the
+    # evaluation instead of the instability surrogate (plan B, 2026-11-09): a decision pays the error of the output it
+    # holds against the ground truth, normalized as in the metrics (500 m) and integrated until the next round, against
+    # one round: -beta E / T - (1 - beta), the objective of the `current` learners without their encoding. Like the
+    # original learners they train in a static network and keep every step.
+    'error-full-range': dict(betaScale='FullRange', missingValue=1, mobileEncoding=0, costSignal='Error',
+                             lossScale=500., costReferenceTime=ERROR_REFERENCE_TIME, trainingTolerances='0.0',
+                             trainingSpeeds='0', completeReplay=1, finalMultiplier=0),
+    # The same, paying the mean error of the node and of its neighbours (CostSignal.Neighbourhood): with its own error
+    # alone (validation-error-full-range, static) a node sleeps 5 s as soon as its value is correct, although its
+    # neighbours receive that value only at its next round, so the field spreads at about 5 s per hop.
+    'neighbourhood-error-full-range': dict(betaScale='FullRange', missingValue=1, mobileEncoding=0,
+                                           costSignal='Neighbourhood', lossScale=500.,
+                                           costReferenceTime=ERROR_REFERENCE_TIME, trainingTolerances='0.0',
+                                           trainingSpeeds='0', completeReplay=1, finalMultiplier=0),
 }
-# Betas swept and focus beta of the variants that do not use the ratio scale of the original objective.
-LINEAR_GRID = ([.2, .4, .6, .8, 1.], .8)
-GRIDS = {'legacy-linear-awaiting': LINEAR_GRID, 'legacy-linear-patient': LINEAR_GRID,
-         'legacy-full-range': ([.2, .4, .6, .8, .95], .8)}
 # Trickle and the gradual controller tuned by beta: after a change they fall back to the best period of an urgent node
 # on the linear scale instead of 0.5 s. Shared controls like the fixed periods, on the grid of the learned variants.
 TUNED_BASELINES = 'tuned-baselines'
 # On the full-range scale they move between the best periods of an unstable and of a stable node (BaselineTuning).
 RANGE_BASELINES = 'range-baselines'
-CONTROL_SETTINGS = {TUNED_BASELINES: dict(tunedBaselines=1), RANGE_BASELINES: dict(tunedBaselines=2, **FULL_RANGE_SHAPE)}
+# The same, between the best periods of the objective of the reactive pilot.
+REACTIVE_BASELINES = 'reactive-baselines'
+CONTROL_SETTINGS = {TUNED_BASELINES: dict(tunedBaselines=1),
+                    RANGE_BASELINES: dict(tunedBaselines=2, **FULL_RANGE_SHAPE),
+                    REACTIVE_BASELINES: dict(tunedBaselines=2, **FULL_RANGE_SHAPE, intensityGain=REACTIVE_GAIN)}
 # The tuned baselines that go with a variant (TUNED_BASELINES by default).
-TUNED_CONTROLS = {'legacy-full-range': RANGE_BASELINES}
+TUNED_CONTROLS = {'legacy-full-range': RANGE_BASELINES, 'legacy-full-range-reactive': REACTIVE_BASELINES,
+                  'error-full-range': RANGE_BASELINES, 'neighbourhood-error-full-range': RANGE_BASELINES}
+# Trickle and the gradual controller on a grid of their two periods (2026-11-09), whatever beta: the shortest one, after
+# a change, and the longest one, when stable (s). Tuned by beta they move on one curve of this grid set by the
+# surrogate objective, not on its best front (at beta 0.2 the untuned ones, 0.5-5 s, have a lower error with the same
+# rounds); the lower envelope of the grid is the best front that these baselines reach.
+BASELINE_SHORTEST_PERIODS = (.5, 1., 1.5, 2., 3.)
+BASELINE_LONGEST_PERIODS = (1., 1.5, 2., 3., 4., 5.)
+BASELINE_PERIODS = [(shortest, longest) for shortest in BASELINE_SHORTEST_PERIODS
+                    for longest in BASELINE_LONGEST_PERIODS if shortest < longest]
+
+
+def baseline_grid_variant(shortest, longest):
+    """The control of the reactive baselines that move between `shortest` and `longest` (s)."""
+    return f'baseline-periods-{shortest:g}-{longest:g}'
+
+
+CONTROL_SETTINGS.update({baseline_grid_variant(shortest, longest):
+                         dict(tunedBaselines=0, baselineMinPeriod=shortest, baselineMaxPeriod=longest)
+                         for shortest, longest in BASELINE_PERIODS})
+# Betas swept and focus beta of the variants (and of their tuned baselines) that do not use the ratio scale of the
+# original objective.
+LINEAR_GRID = ([.2, .4, .6, .8, 1.], .8)
+FULL_RANGE_GRID = ([.2, .4, .6, .8, .95], .8)
+GRIDS = {'legacy-linear-awaiting': LINEAR_GRID, 'legacy-linear-patient': LINEAR_GRID, TUNED_BASELINES: LINEAR_GRID,
+         'legacy-full-range': FULL_RANGE_GRID, RANGE_BASELINES: FULL_RANGE_GRID,
+         'legacy-full-range-reactive': FULL_RANGE_GRID, REACTIVE_BASELINES: FULL_RANGE_GRID,
+         'error-full-range': FULL_RANGE_GRID, 'neighbourhood-error-full-range': FULL_RANGE_GRID}
 FAMILIES = ('static', 'dynamic', 'generalization', 'beta-study', 'attention', 'filmstrip', 'learning')
 
 
 def grid_of(variant):
     """The betas swept and the focus beta of `variant`."""
     return GRIDS.get(variant, (BETAS, FOCUS_BETA))
+
+
+def focus_of(variant):
+    """The beta at which `variant` is compared with the other methods (the shared controls run at FOCUS_BETA)."""
+    return grid_of(variant)[1]
+
+
+def tuned_control_of(variant):
+    """Trickle and the gradual controller tuned by beta on the scale of `variant`."""
+    return TUNED_CONTROLS.get(variant, TUNED_BASELINES)
 
 
 def digest(path):
@@ -214,8 +278,18 @@ def tuned_baseline_jobs(split, scenarios, swept_scenarios, grid, smoke=False, ov
                       overrides=overrides)
 
 
+def baseline_grid_jobs(split, scenarios, smoke=False, overrides=None):
+    """Trickle and the gradual controller at every pair of periods of the grid, once per evaluation seed (they do not
+    learn: the training seed changes nothing), at the focus beta, which they ignore."""
+    seed = TRAIN_SEEDS[split][0]
+    for scenario, (shortest, longest), evaluation_seed, algorithm in product(
+            scenarios, BASELINE_PERIODS, seeds_of(split, smoke)[1], BASELINES):
+        yield job(split, baseline_grid_variant(shortest, longest), algorithm, FOCUS_BETA, seed, evaluation_seed,
+                  scenario, smoke, shared=True, overrides=overrides)
+
+
 def jobs(split, variants, smoke=False, shared=True, finals=None, algorithms=LEARNED, families=None, overrides=None,
-         beta_study_only=False, swept=(), controls=True, tuned_baselines=False):
+         beta_study_only=False, swept=(), controls=True, tuned_baselines=False, baseline_grid=False):
     """Validation: every variant on the core scenarios at the focus beta. Test: `variants` (the control and the
     selections) on every scenario, the legacy control on the comparable ones, and the beta study of the final variant
     of each architecture (`finals`: algorithm -> variant, by default the last of `variants`). `algorithms` and
@@ -223,8 +297,9 @@ def jobs(split, variants, smoke=False, shared=True, finals=None, algorithms=LEAR
     `beta_study_only` keeps only the other betas of the finals (a supplement to a test campaign that has the rest);
     `swept` families run every variant at every beta (a validation of the trade-off curves); without `controls`, a
     test campaign leaves out the legacy control (another campaign of the same seeds has it); `tuned_baselines` adds
-    the baselines tuned by beta on the grid of the last variant, swept where the variants are. Each variant sweeps its
-    own grid of betas (`grid_of`)."""
+    the baselines tuned by beta on the grid of the last variant, swept where the variants are; `baseline_grid` the
+    baselines on the grid of their periods (BASELINE_PERIODS). Each variant sweeps its own grid of betas
+    (`grid_of`)."""
     scenarios = SCENARIOS[split]
     if smoke:
         scenarios = [STATIC, *PROGRAMS]
@@ -251,15 +326,17 @@ def jobs(split, variants, smoke=False, shared=True, finals=None, algorithms=LEAR
     if tuned_baselines:
         swept_scenarios = [s for s in scenarios if s[0] in swept or s in beta_scenarios]
         yield from tuned_baseline_jobs(split, scenarios, swept_scenarios, grid_of(variants[-1]), smoke, overrides,
-                                       TUNED_CONTROLS.get(variants[-1], TUNED_BASELINES))
+                                       tuned_control_of(variants[-1]))
+    if baseline_grid:
+        yield from baseline_grid_jobs(split, scenarios, smoke, overrides)
 
 
 def prepare(split, variants, smoke=False, name=None, shared=True, finals=None, algorithms=LEARNED, families=None,
-            overrides=None, beta_study_only=False, swept=(), controls=True, tuned_baselines=False):
+            overrides=None, beta_study_only=False, swept=(), controls=True, tuned_baselines=False, baseline_grid=False):
     home = HOME / (name or ('smoke' if smoke else split))
     home.mkdir(parents=True, exist_ok=True)
     plan = list(jobs(split, variants, smoke, shared, finals, algorithms, families, overrides, beta_study_only, swept,
-                     controls, tuned_baselines))
+                     controls, tuned_baselines, baseline_grid))
     manifest = home / 'manifest.json'
     if manifest.exists():
         if json.loads(manifest.read_text()) != plan:
@@ -338,7 +415,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['archive', 'prepare', 'run'])
     parser.add_argument('--split', choices=SPLITS, default='validation')
-    parser.add_argument('--variants', nargs='+', choices=VARIANTS, default=list(VARIANTS))
+    parser.add_argument('--variants', nargs='*', choices=VARIANTS, default=list(VARIANTS),
+                        help='Learned variants (none, with no value: e.g. a campaign of baselines only)')
     parser.add_argument('--workers', type=int, default=2)
     parser.add_argument('--smoke', action='store_true')
     parser.add_argument('--limit', type=int, help='Run only the first N declared jobs; manifest remains complete')
@@ -362,6 +440,8 @@ def main():
                              'the same seeds has them)')
     parser.add_argument('--tuned-baselines', action='store_true',
                         help='Also Trickle and the gradual controller tuned by beta, on the grid of the variants')
+    parser.add_argument('--baseline-grid', action='store_true',
+                        help='Also Trickle and the gradual controller on the grid of their periods (BASELINE_PERIODS)')
     parser.add_argument('--set', dest='overrides', nargs='+', default=[], metavar='NAME=VALUE',
                         help='Setting of every run of the campaign, the shared controls included (e.g. retention=15)')
     args = parser.parse_args()
@@ -377,7 +457,8 @@ def main():
     overrides = {name: json.loads(value) for name, value in (item.split('=', 1) for item in args.overrides)}
     home, plan = prepare(args.split, variants, args.smoke, args.name, not args.without_shared, finals,
                          tuple(args.algorithms), args.families, overrides or None, args.beta_study_only,
-                         tuple(args.sweep_families), not args.without_controls, args.tuned_baselines)
+                         tuple(args.sweep_families), not args.without_controls, args.tuned_baselines,
+                         args.baseline_grid)
     print(f'{len(plan)} runs: {home}', flush=True)
     if args.action == 'run':
         with ThreadPoolExecutor(max_workers=args.workers) as executor:

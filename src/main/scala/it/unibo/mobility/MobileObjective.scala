@@ -4,6 +4,8 @@ package it.unibo.mobility
 object MobileObjective:
   /** Bound replay memory when relabelling over both tolerance and beta. */
   val ReplayCapacityPerRegime: Int = 25000
+
+  /** Seconds for which holding the whole loss scale costs as much as a round at β 0.5, unless configured otherwise. */
   val ReferenceTime: Double = 1.0
   val RoundCost: Double = 1.0
 
@@ -21,3 +23,6 @@ enum CostSignal:
 
   /** The gap between the held value and the one a round would compute now ([[Staleness]]). */
   case Staleness
+
+  /** The mean error of the node and of its neighbours ([[NeighbourhoodError]]). */
+  case Neighbourhood

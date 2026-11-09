@@ -137,8 +137,9 @@ FRONTIER_GAINS = {
 }
 
 
-def frontier_gains(evaluation: pd.DataFrame, methods: tuple[Method, ...] = LEARNED) -> pd.DataFrame:
-    """Gains of every learned (method, beta) over the fixed-period schedules.
+def frontier_gains(evaluation: pd.DataFrame, methods: tuple[Method, ...] = LEARNED,
+                   weights=config.WEIGHTS) -> pd.DataFrame:
+    """Gains of every learned (method, beta of `weights`) over the fixed-period schedules.
 
     * ``error_at_ticks`` / ``unstable_at_ticks``: relative reduction w.r.t. the
       fixed-period frontier at the same rounds;
@@ -154,7 +155,7 @@ def frontier_gains(evaluation: pd.DataFrame, methods: tuple[Method, ...] = LEARN
     fastest = baseline[np.isclose(baseline.period, config.FIXED_PERIODS_S[0])]
     rows = []
     for method in methods:
-        for weight in config.WEIGHTS:
+        for weight in weights:
             runs = select(evaluation, method.key, weight=weight)
             intervals = {
                 "error_at_ticks": _bootstrap_gain(runs, baseline, "error", saving=False),
