@@ -43,6 +43,14 @@ class StratifiedTransitionsSpec extends AnyFlatSpec with Matchers:
     transitionsWith(unstable, stable).sample(5, new Random(5)) shouldBe expectedUnstable ++ expectedStable
   }
 
+  it should "sample a single regime, or nothing when it is empty" in {
+    transitionsWith(unstable, stable)
+      .sampleRegime(6, new Random(1), unstable = true)
+      .foreach(unstable should contain(_))
+    transitionsWith(unstable, stable).sampleRegime(6, new Random(1), unstable = false).foreach(stable should contain(_))
+    transitionsWith(unstable, Seq.empty).sampleRegime(6, new Random(1), unstable = false) shouldBe empty
+  }
+
   it should "expose the oldest transitions of each regime" in {
     transitionsWith(unstable, stable).oldest(2) shouldBe Vector("u1", "u2", "s1", "s2")
   }

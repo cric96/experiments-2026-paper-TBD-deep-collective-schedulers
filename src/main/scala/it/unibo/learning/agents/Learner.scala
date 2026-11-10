@@ -2,6 +2,7 @@ package it.unibo.learning.agents
 
 import it.unibo.learning.abstractions.ReplayBuffer.Experience
 import it.unibo.learning.abstractions.{AgentState, DecayReference, Trajectory}
+import it.unibo.learning.agents.offline.TrainingDiagnostic
 
 import scala.util.Random
 
@@ -28,5 +29,9 @@ trait Learner:
   /** Lets the simulation provide its seeded source of randomness. */
   def injectRandom(random: Random): Unit = ()
 
+  /** What the training sessions so far left in the learner ([[TrainingDiagnostic]]), if it is diagnosed. */
+  def trainingDiagnostics: Seq[TrainingDiagnostic] = Seq.empty
+
   /** Hyper-parameters, by name, that the simulation decays at the end of every episode. */
   def decayingParameters: Seq[(String, DecayReference[Double])] = Seq.empty
+end Learner

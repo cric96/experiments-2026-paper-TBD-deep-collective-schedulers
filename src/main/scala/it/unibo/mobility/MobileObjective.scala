@@ -26,3 +26,8 @@ enum CostSignal:
 
   /** The mean error of the node and of its neighbours ([[NeighbourhoodError]]). */
   case Neighbourhood
+
+  /** The errors of the network, discounted at every hop from the node ([[NetworkError]]), per unit of the effective
+    * size of the network ([[SpatialWeights.effectiveSize]]).
+    */
+  case Network

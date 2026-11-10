@@ -1,6 +1,6 @@
 package it.unibo.mobility
 
-import it.unibo.learning.abstractions.{AgentState, MobileOutcome, Step, Trajectory}
+import it.unibo.learning.abstractions.*
 
 /** What the experiment observes of a node after a simulator event: its error w.r.t. the ground truth, whether the
   * source can reach it, and the signal that its decisions pay for ([[CostSignal]]).
@@ -11,12 +11,29 @@ final case class NodeObservation(error: Double, reachable: Boolean, cost: Double
 final case class NodeTotals(rounds: Long, absoluteError: Double)
 
 /** Accounting for a single episode; each action owns its measured holding interval, including terminal tails. The
-  * metrics integrate the held error at the encoding scale, the decisions pay for the cost signal at the loss scale.
+  * metrics integrate the held error at the encoding scale, the decisions pay for the cost signal at the loss scale: the
+  * network cost of a training episode discounted within the sleep ([[DiscountedCost]]), the others undiscounted.
+  * `costScale` is the factor the costs were divided by ([[MobileOutcome.costScale]]).
   */
-final class MobileEpisode(config: MobilityConfig, val index: Int, val start: Double):
-  final private case class Pending(state: AgentState, period: Double, time: Double, costs: Map[Double, Double])
+final class MobileEpisode(
+    config: MobilityConfig,
+    val index: Int,
+    val start: Double,
+    costScale: () => Double = () => 1.0
+):
+  final private case class Pending(
+      state: AgentState,
+      period: Double,
+      time: Double,
+      costs: Map[Double, Double],
+      context: CriticContext
+  )
   private val integrals = NodeIntegrals(config.tolerances, config.metricScaleAt(index))
   private val costIntegrals = NodeIntegrals(config.tolerances, config.lossScale)
+  private val discountsSleeps: Boolean = config.isTraining(index) && config.costSignal == CostSignal.Network
+  private val stratification: Stratification =
+    if config.costSignal == CostSignal.Network then Stratification.ByLocalRegime else Stratification.ByCost
+  private var sleeps: Map[Int, DiscountedCost] = Map.empty
   private var pending: Map[Int, Pending] = Map.empty
   private var steps: Map[Int, Vector[Step]] = Map.empty
   private var rounds: Long = 0L
@@ -26,8 +43,9 @@ final class MobileEpisode(config: MobilityConfig, val index: Int, val start: Dou
 
   /** Retain completed contributions, with no accrual after physical removal. */
   def remove(id: Int, now: Double): Unit =
-    pending.get(id).foreach(previous => close(id, previous.state, now, terminal = true))
+    pending.get(id).foreach(previous => close(id, previous.state, previous.context, now, terminal = true))
     pending -= id
+    sleeps -= id
     integrals.retire(id)
     costIntegrals.retire(id)
 
@@ -41,8 +59,12 @@ final class MobileEpisode(config: MobilityConfig, val index: Int, val start: Dou
     changed.foreach { case (id, observation) =>
       integrals.observe(id, now - start, observation.error, observation.reachable)
       costIntegrals.observe(id, now - start, observation.cost, observation.reachable)
+      if discountsSleeps then observeSleep(id, now, observation.cost / config.lossScale)
     }
     updateRecovery(now, all)
+
+  private def observeSleep(id: Int, now: Double, rate: Double): Unit =
+    sleeps += id -> sleeps.get(id).fold(DiscountedCost(config.costDiscount, now, rate))(_.observe(now, rate))
 
   private def updateRecovery(now: Double, observations: Map[Int, NodeObservation]): Unit =
     val changeTime = start + config.episodeLength / 2.0
@@ -54,33 +76,56 @@ final class MobileEpisode(config: MobilityConfig, val index: Int, val start: Dou
       if fraction >= config.recoveryFraction then recoveryStart = recoveryStart.orElse(Some(now))
       else recoveryStart = None
 
-  def decision(state: AgentState, period: Double, now: Double): Unit =
-    close(state.me, state, now, terminal = false)
+  def decision(state: AgentState, period: Double, now: Double, context: CriticContext = CriticContext.Unknown): Unit =
+    close(state.me, state, context, now, terminal = false)
     val costs = config.tolerances.map(tolerance => tolerance -> costIntegrals(state.me).cost(tolerance)).toMap
-    pending += state.me -> Pending(state, period, now, costs)
+    pending += state.me -> Pending(state, period, now, costs, context)
+    sleeps.get(state.me).foreach(sleep => sleeps += state.me -> sleep.restart(now))
     rounds += 1
     nodeRounds += state.me -> (nodeRounds.getOrElse(state.me, 0L) + 1)
 
   def nodeTotals(id: Int): NodeTotals = NodeTotals(nodeRounds.getOrElse(id, 0L), integrals.absoluteOf(id))
 
-  private def close(id: Int, nextState: AgentState, now: Double, terminal: Boolean): Unit =
+  private def close(id: Int, nextState: AgentState, nextContext: CriticContext, now: Double, terminal: Boolean): Unit =
     pending.get(id).foreach { previous =>
       val costs = config.tolerances
         .map(tolerance => tolerance -> (costIntegrals(id).cost(tolerance) - previous.costs(tolerance)))
         .toMap
-      val trainingCosts = costs.collect {
-        case (tolerance, cost) if config.trainingTolerances.contains(tolerance) =>
-          tolerance -> cost / config.costReferenceTime
-      }
-      val outcome = MobileOutcome(now - previous.time, trainingCosts, nextState, terminal, MobileObjective.RoundCost)
+      val trainingCosts = if discountsSleeps then discountedCosts(id, now) else undiscountedCosts(costs)
+      val outcome = MobileOutcome(
+        now - previous.time,
+        trainingCosts,
+        nextState,
+        terminal,
+        MobileObjective.RoundCost,
+        previous.context,
+        nextContext,
+        costScale(),
+        stratification
+      )
       val reward = MobileObjective.reward(costs(config.toleranceAt(index)), outcome.energy, config.beta)
       val step = Step(previous.state, -1, previous.period, reward, Some(outcome))
       steps += id -> (steps.getOrElse(id, Vector.empty) :+ step)
     }
 
+  /** The training costs of a decision, from what it paid at every tolerance, in units of the cost reference time. */
+  private def undiscountedCosts(costs: Map[Double, Double]): Map[Double, Double] = costs.collect {
+    case (tolerance, cost) if config.trainingTolerances.contains(tolerance) =>
+      tolerance -> cost / config.costReferenceTime
+  }
+
+  /** The training cost of the decision of `id` that ends at `now`: its cost discounted within the sleep, in units of
+    * the cost reference time.
+    */
+  private def discountedCosts(id: Int, now: Double): Map[Double, Double] =
+    val cost = sleeps.get(id).fold(0.0)(_.advance(now).integral) / config.costReferenceTime
+    config.trainingTolerances.map(_ -> cost).toMap
+
   def finish(now: Double): Seq[Trajectory] =
     (integrals.activeValues ++ costIntegrals.activeValues).foreach(_.advance(now - start))
-    pending.toSeq.sortBy(_._1).foreach { case (id, previous) => close(id, previous.state, now, terminal = true) }
+    pending.toSeq.sortBy(_._1).foreach { case (id, previous) =>
+      close(id, previous.state, previous.context, now, terminal = true)
+    }
     pending = Map.empty
     steps.toSeq.sortBy(_._1).map(_._2)
 

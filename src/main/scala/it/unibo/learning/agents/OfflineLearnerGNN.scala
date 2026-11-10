@@ -1,13 +1,13 @@
 package it.unibo.learning.agents
 
 import ai.djl.ndarray.index.NDIndex
+import ai.djl.ndarray.types.Shape
 import ai.djl.ndarray.{NDArray, NDManager}
 import ai.djl.nn.Activation
 import it.unibo.learning.TradeOff
 import it.unibo.mobility.MobileObjective
-import it.unibo.learning.abstractions.{AgentState, Trajectory}
+import it.unibo.learning.abstractions.{AgentState, CriticContext, Trajectory}
 import it.unibo.learning.agents.OfflineLearnerGNN.*
-import it.unibo.learning.agents.offline.BatchTensors.{column, rows}
 import it.unibo.learning.agents.offline.*
 import it.unibo.learning.encoding.{MissingValue, MobileEncoding, MobileFeatures, StarGraph}
 import it.unibo.learning.network.{EdgeGATBlock, MinMaxActionScaler, TorchNetwork}
@@ -15,7 +15,9 @@ import it.unibo.learning.network.NDArrayOps.*
 
 /** Offline TD3 on the node's star graph: an edge-conditioned graph-attention actor (EdgeGAT) and twin multi-objective
   * critics that predict [Q_convergence, Q_energy], scalarized with the objective weights of each transition's trade-off
-  * β, with delayed policy updates and target policy smoothing ([[TwinDelayed]]).
+  * β, with delayed policy updates and target policy smoothing ([[TwinDelayed]]). A `privilegedCritic` also sees what
+  * the mobile experiment measured of each decision on the ground truth ([[CriticContext]]); the actor never does. A
+  * `diagnosed` learner diagnoses its networks after every training session ([[TrainingDiagnostics]]).
   */
 final class OfflineLearnerGNN(
     min: Double,
@@ -36,7 +38,9 @@ final class OfflineLearnerGNN(
     periodExploration: PeriodExploration = PeriodExploration.Uniform,
     mobileEncoding: Boolean = true,
     rewardShape: TradeOff.RewardShape = TradeOff.RewardShape(),
-    missingValueFeature: Boolean = false
+    missingValueFeature: Boolean = false,
+    privilegedCritic: Boolean = false,
+    diagnosed: Boolean = false
 ) extends EpisodicOfflineLearner[GraphTransition](
       randomKey,
       weight,
@@ -50,6 +54,8 @@ final class OfflineLearnerGNN(
     else StarGraph.SelfDim
   private val neighDim: Int =
     if mobile && mobileEncoding then MobileEncoding.neighDim(mobileFeatures) else StarGraph.NeighDim
+  require(!privilegedCritic || mobile, "Only the mobile experiment measures the context of a privileged critic")
+  private val contextDim: Int = if privilegedCritic then CriticContext.Size else 0
   private val actionScaler: MinMaxActionScaler = MinMaxActionScaler(min, max)
   private val networkSeed: Int = LearnerSeeds.networks(randomKey, weight)
   private val actor: TorchNetwork[EdgeGATBlock] = actorNetwork("gat-actor", seedOffset = 101)
@@ -80,11 +86,13 @@ final class OfflineLearnerGNN(
       seed = networkSeed + seedOffset
     )
 
-  /** A critic sees the scaled action as an extra ego feature and predicts one value per objective. */
+  /** A critic sees the scaled action (and the context, if privileged) as extra ego features and predicts one value per
+    * objective.
+    */
   private def criticNetwork(name: String, seedOffset: Int): TorchNetwork[EdgeGATBlock] =
     TorchNetwork.createEdgeGAT(
       name,
-      selfDim + 1,
+      selfDim + 1 + contextDim,
       StarGraph.MaxNeighbors,
       neighDim,
       edgeHidden,
@@ -139,17 +147,19 @@ final class OfflineLearnerGNN(
       convergenceReward = relabelled.errorIntegral.fold(-(u * u))(-_).toFloat,
       energyReward = (if mobile then -relabelled.energyCost else -((1.0 - u) * (1.0 - u))).toFloat,
       convergenceWeight = (if mobile then relabelled.beta else weights.convergence).toFloat,
-      energyWeight = (if mobile then 1.0 - relabelled.beta else weights.energy).toFloat,
+      energyWeight = (if mobile then (1.0 - relabelled.beta) / relabelled.costScale else weights.energy).toFloat,
       nextState = relabelled.nextState,
       terminal = relabelled.terminalFlag,
       discountFactor = relabelled.discount,
-      deferredBeta = relabelled.deferredBeta
+      deferredBeta = relabelled.deferredBeta,
+      context = relabelled.context,
+      nextContext = relabelled.nextContext
     )
 
   override protected def trainOn(batch: Vector[GraphTransition], manager: NDManager): Unit =
-    val tensors = GraphBatch(batch, manager)
+    val tensors = GraphBatch(batch, manager, privilegedCritic)
     val targets = clippedDoubleQTargets(tensors)
-    val stateActions = withAction(tensors.states, tensors.actions)
+    val stateActions = withAction(tensors.states, tensors.actions, tensors.contexts)
     Seq(critic1, critic2).foreach { critic =>
       critic.trainStep(TorchNetwork.smoothL1Loss(critic.forward(stateActions, training = true), targets))
     }
@@ -164,26 +174,61 @@ final class OfflineLearnerGNN(
 
   /** r + γ^Δt · min(Q1_target, Q2_target)(s', π_target(s') + clipped noise), one column per objective. */
   private def clippedDoubleQTargets(tensors: GraphBatch): NDArray =
-    val nextActions = TwinDelayed.smoothed(targetActor.evaluate(tensors.nextStates), random)
-    val nextStateActions = withAction(tensors.nextStates, nextActions)
+    doubleQTargets(tensors, TwinDelayed.smoothed(targetActor.evaluate(tensors.nextStates), random))
+
+  /** r + γ^Δt · min(Q1_target, Q2_target)(s', `nextActions`), one column per objective. */
+  private def doubleQTargets(tensors: GraphBatch, nextActions: NDArray): NDArray =
+    val nextStateActions = withAction(tensors.nextStates, nextActions, tensors.nextContexts)
     val nextValues = targetCritic1.evaluate(nextStateActions).minimum(targetCritic2.evaluate(nextStateActions))
     (tensors.rewards + nextValues * tensors.discounts * (-tensors.terminals + 1.0f)).stopGradient()
 
   /** The actor maximizes w_convergence · Q_convergence + w_energy · Q_energy of its own actions (first critic). */
   private def actorLoss(tensors: GraphBatch): NDArray =
     val actions = actor.forward(tensors.states, training = true)
-    val values = critic1.forward(withAction(tensors.states, actions), training = true)
+    val values = critic1.forward(withAction(tensors.states, actions, tensors.contexts), training = true)
     -(values * tensors.objectiveWeights).sum(Array(1)).mean()
 
-  /** Inserts the (B × 1) actions right after the ego features of the (B × TotalDim) star-graph states. */
-  private def withAction(states: NDArray, actions: NDArray): NDArray =
+  /** Inserts the (B × 1) actions, and the (B × [[CriticContext.Size]]) contexts of a privileged critic, right after the
+    * ego features of the (B × TotalDim) star-graph states.
+    */
+  private def withAction(states: NDArray, actions: NDArray, contexts: Option[NDArray]): NDArray =
     val ego = states.get(new NDIndex(":, :{}", java.lang.Long.valueOf(selfDim.toLong)))
     val neighbours = states.get(new NDIndex(":, {}:", java.lang.Long.valueOf(selfDim.toLong)))
-    ego.concat(actions, 1).concat(neighbours, 1)
+    val egoAndAction = ego.concat(actions, 1)
+    contexts.fold(egoAndAction)(egoAndAction.concat(_, 1)).concat(neighbours, 1)
 
   override protected def onTrained(): Unit =
     fastActor = actor.block.snapshotFastInference()
     fastEmbeddingAndAttention = actor.block.snapshotEmbeddingAndAttention()
+
+  override protected def diagnosticProbe: Option[DiagnosticProbe[GraphTransition]] = Option.when(diagnosed)(Probe)
+
+  /** The networks seen by the diagnostics: the first critic is scalarized with each transition's objective weights. */
+  private object Probe extends DiagnosticProbe[GraphTransition]:
+    private val betaOfFeature: Map[Float, Double] =
+      Relabelling
+        .targetWeights(weight, rewardShape.scale.counterfactualWeights)
+        .map(beta => encodedBeta(beta) -> beta)
+        .toMap
+
+    override val grid: Seq[Double] = TrainingDiagnostics.grid(min, max)
+
+    override def betaOf(transition: GraphTransition): Option[Double] =
+      transition.deferredBeta.flatMap(beta => betaOfFeature.get(beta.value))
+
+    override def probe(batch: Vector[GraphTransition], manager: NDManager): ProbedBatch =
+      val tensors = GraphBatch(batch, manager, privilegedCritic)
+      def values(actions: NDArray): NDArray = critic1.evaluate(withAction(tensors.states, actions, tensors.contexts))
+      def scalarized(period: Double): Seq[Double] =
+        val actions = manager.full(new Shape(batch.size.toLong, 1), actionScaler.scale(period))
+        (values(actions) * tensors.objectiveWeights).sum(Array(1)).toFloatArray.toSeq.map(_.toDouble)
+      val targets = doubleQTargets(tensors, targetActor.evaluate(tensors.nextStates))
+      ProbedBatch(
+        TorchNetwork.smoothL1Loss(values(tensors.actions), targets).getFloat().toDouble,
+        actor.evaluate(tensors.states).toFloatArray.toSeq.map(action => actionScaler.unscale(action.toDouble)),
+        grid.map(scalarized)
+      )
+  end Probe
 end OfflineLearnerGNN
 
 object OfflineLearnerGNN:
@@ -196,43 +241,3 @@ object OfflineLearnerGNN:
 
   /** What the actor attends to in a state: its readout embedding and one attention weight per neighbour slot. */
   final case class AttentionInspection(embedding: Array[Float], attention: Array[Float], neighbours: List[Int])
-
-  final case class GraphTransition(
-      state: Array[Float],
-      scaledAction: Float,
-      convergenceReward: Float,
-      energyReward: Float,
-      convergenceWeight: Float,
-      energyWeight: Float,
-      nextState: Array[Float],
-      terminal: Float,
-      discountFactor: Float,
-      deferredBeta: Option[DeferredBeta] = None
-  ):
-    def conditionedState: Array[Float] = DeferredBeta.conditioned(state, deferredBeta)
-    def conditionedNextState: Array[Float] = DeferredBeta.conditioned(nextState, deferredBeta)
-
-  /** A batch of graph transitions as tensors: rewards and objective weights have one column per objective. */
-  final private case class GraphBatch(
-      states: NDArray,
-      nextStates: NDArray,
-      actions: NDArray,
-      rewards: NDArray,
-      objectiveWeights: NDArray,
-      terminals: NDArray,
-      discounts: NDArray
-  )
-
-  private object GraphBatch:
-    def apply(batch: Vector[GraphTransition], manager: NDManager): GraphBatch =
-      GraphBatch(
-        states = rows(batch.map(_.conditionedState), manager),
-        nextStates = rows(batch.map(_.conditionedNextState), manager),
-        actions = column(batch.map(_.scaledAction), manager),
-        rewards = rows(batch.map(transition => Array(transition.convergenceReward, transition.energyReward)), manager),
-        objectiveWeights =
-          rows(batch.map(transition => Array(transition.convergenceWeight, transition.energyWeight)), manager),
-        terminals = column(batch.map(_.terminal), manager),
-        discounts = column(batch.map(_.discountFactor), manager)
-      )
-end OfflineLearnerGNN

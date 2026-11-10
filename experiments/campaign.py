@@ -131,6 +131,25 @@ VARIANTS = {
                                            costReferenceTime=ERROR_REFERENCE_TIME, trainingTolerances='0.0',
                                            trainingSpeeds='0', completeReplay=1, finalMultiplier=0),
 }
+# The full-range learners trained on the global objective (2026-11-10): the neighbourhood error charges only the
+# neighbours, an order of magnitude less than the effect of a sleep on the whole network, so the learners covered only
+# the low-rounds end of the front (up to 0.37 rounds/s). A decision now pays the errors of the network discounted by the
+# spatial discount at every hop (CostSignal.Network: summed, divided by the effective size of the network, the energy
+# divided alike), discounted within its sleep like the rewards that follow it; the replay is stratified by the node's
+# own regime. Their critics also see the node's own loss, its charged cost and the mean loss of the network
+# (privilegedCritic), never their actors. They train on a composite episode (SourceSwitchThenMotion): start-up and quiet
+# until 100 s, a source switch at 100 s, every node moving at 1 or 2 m/s from 150 to 180 s, then still. The training
+# motion lasts trainingMotionDuration, so that the dynamic evaluation keeps its motionDuration (50 s). Training
+# diagnostics: <run>_training.csv.
+NETWORK_ERROR = dict(VARIANTS['neighbourhood-error-full-range'], costSignal='Network', privilegedCritic=1,
+                     trainingDiagnostics=1, trainingEvents='SourceSwitchThenMotion', trainingSpeeds='1,2',
+                     motionDelay=50., trainingMotionDuration=30.)
+# The spatial discounts of the pilot of the global objective (validation-network-error-discount).
+NETWORK_DISCOUNTS = (.5, .75)
+VARIANTS['network-error-full-range'] = NETWORK_ERROR
+VARIANTS.update({f'network-error-discount-{discount:g}': dict(NETWORK_ERROR, spatialDiscount=discount)
+                 for discount in NETWORK_DISCOUNTS})
+NETWORK_VARIANTS = ('network-error-full-range', *(f'network-error-discount-{discount:g}' for discount in NETWORK_DISCOUNTS))
 # Trickle and the gradual controller tuned by beta: after a change they fall back to the best period of an urgent node
 # on the linear scale instead of 0.5 s. Shared controls like the fixed periods, on the grid of the learned variants.
 TUNED_BASELINES = 'tuned-baselines'
@@ -143,7 +162,8 @@ CONTROL_SETTINGS = {TUNED_BASELINES: dict(tunedBaselines=1),
                     REACTIVE_BASELINES: dict(tunedBaselines=2, **FULL_RANGE_SHAPE, intensityGain=REACTIVE_GAIN)}
 # The tuned baselines that go with a variant (TUNED_BASELINES by default).
 TUNED_CONTROLS = {'legacy-full-range': RANGE_BASELINES, 'legacy-full-range-reactive': REACTIVE_BASELINES,
-                  'error-full-range': RANGE_BASELINES, 'neighbourhood-error-full-range': RANGE_BASELINES}
+                  'error-full-range': RANGE_BASELINES, 'neighbourhood-error-full-range': RANGE_BASELINES,
+                  **{variant: RANGE_BASELINES for variant in NETWORK_VARIANTS}}
 # Trickle and the gradual controller on a grid of their two periods (2026-11-09), whatever beta: the shortest one, after
 # a change, and the longest one, when stable (s). Tuned by beta they move on one curve of this grid set by the
 # surrogate objective, not on its best front (at beta 0.2 the untuned ones, 0.5-5 s, have a lower error with the same
@@ -169,7 +189,8 @@ FULL_RANGE_GRID = ([.2, .4, .6, .8, .95], .8)
 GRIDS = {'legacy-linear-awaiting': LINEAR_GRID, 'legacy-linear-patient': LINEAR_GRID, TUNED_BASELINES: LINEAR_GRID,
          'legacy-full-range': FULL_RANGE_GRID, RANGE_BASELINES: FULL_RANGE_GRID,
          'legacy-full-range-reactive': FULL_RANGE_GRID, REACTIVE_BASELINES: FULL_RANGE_GRID,
-         'error-full-range': FULL_RANGE_GRID, 'neighbourhood-error-full-range': FULL_RANGE_GRID}
+         'error-full-range': FULL_RANGE_GRID, 'neighbourhood-error-full-range': FULL_RANGE_GRID,
+         **{variant: FULL_RANGE_GRID for variant in NETWORK_VARIANTS}}
 FAMILIES = ('static', 'dynamic', 'generalization', 'beta-study', 'attention', 'filmstrip', 'learning')
 
 

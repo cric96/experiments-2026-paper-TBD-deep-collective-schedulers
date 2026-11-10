@@ -1,8 +1,8 @@
 package it.unibo.learning.agents.offline
 
 import it.unibo.learning.TradeOff
-import it.unibo.learning.abstractions.{AgentState, Step, Trajectory}
-import it.unibo.learning.encoding.InstabilityIntensity
+import it.unibo.learning.abstractions.{AgentState, Step, Stratification, Trajectory}
+import it.unibo.learning.encoding.{InstabilityIntensity, MissingValue}
 
 /** A logged step relabelled for a target trade-off weight `beta`: both states are conditioned on `beta`, so that a
   * single β-conditioned policy can be trained for every trade-off from the same experience.
@@ -11,6 +11,11 @@ import it.unibo.learning.encoding.InstabilityIntensity
   *   the instability intensity of the step's state, which determines the counterfactual reward for `beta`
   * @param discount
   *   the semi-Markov discount γ^Δt of the step, where Δt is the wake-up period it chose
+  * @param context
+  *   the features that only the privileged critics see of the step ([[it.unibo.learning.abstractions.CriticContext]]),
+  *   and `nextContext` those of the next step, shared by the relabelled copies of a step; empty if not measured
+  * @param costScale
+  *   the factor the measured cost was divided by ([[it.unibo.learning.abstractions.MobileOutcome.costScale]])
   */
 final case class RelabelledStep(
     step: Step,
@@ -22,7 +27,10 @@ final case class RelabelledStep(
     discount: Float,
     errorIntegral: Option[Double] = None,
     energyCost: Double = 1.0,
-    deferredBeta: Option[DeferredBeta] = None
+    deferredBeta: Option[DeferredBeta] = None,
+    context: Array[Float] = Array.emptyFloatArray,
+    nextContext: Array[Float] = Array.emptyFloatArray,
+    costScale: Double = 1.0
 ):
   def isUnstable: Boolean = intensity > 0.0
 
@@ -108,25 +116,38 @@ object Relabelling:
     trajectory.flatMap { step =>
       val outcome =
         step.mobileOutcome.getOrElse(throw new IllegalArgumentException("Mobile training requires measured outcomes"))
+      val context = outcome.context.features
+      val nextContext = outcome.nextContext.features
+      lazy val locallyUnstable = isLocallyUnstable(step.state)
       outcome.errorIntegrals.toSeq.sortBy(_._1).flatMap { case (tolerance, cost) =>
         val current = encode(step.state.copy(tolerance = tolerance))
         val next = encode(outcome.nextState.copy(tolerance = tolerance))
+        val unstable = outcome.stratification match
+          case Stratification.ByCost => cost > 0.0
+          case Stratification.ByLocalRegime => locallyUnstable
         weights.map { beta =>
           RelabelledStep(
             step,
             current,
             next,
             beta,
-            if cost > 0.0 then 1.0 else 0.0,
+            if unstable then 1.0 else 0.0,
             outcome.terminal,
             math.pow(gamma, outcome.duration).toFloat,
             Some(cost),
             outcome.energy,
-            Some(betaFeature.of(beta))
+            Some(betaFeature.of(beta)),
+            context,
+            nextContext,
+            outcome.costScale
           )
         }
       }
     }
+
+  /** Whether the node sees a change of its own or of its neighbourhood, or has no value yet. */
+  private def isLocallyUnstable(state: AgentState): Boolean =
+    InstabilityIntensity.of(state) > 0.0 || MissingValue.of(state)
 
   /** Where the β feature goes and how a β is encoded in it. */
   final private case class DeferredFeature(index: Int, feature: Double => Float):

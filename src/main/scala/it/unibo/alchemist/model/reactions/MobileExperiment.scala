@@ -8,6 +8,7 @@ import it.unibo.alchemist.model.scafi.nodes.SimpleNodeManager
 import it.unibo.learning.{Box, LearningInfo}
 import it.unibo.learning.abstractions.{AgentState, ReplayBuffer}
 import it.unibo.learning.agents.Learner
+import it.unibo.learning.agents.offline.TrainingDiagnostic
 import it.unibo.mobility.{BrownianMotion, EpisodeEvent, MobileEpisode, MobilityConfig, MovingRegion, NodeMotion}
 import it.unibo.scafi.{BuildingBlock, SchedulingCoordinator, Sensors}
 import it.unibo.util.Csv
@@ -32,7 +33,7 @@ final class MobileExperiment[T, P <: Position[P]](
   private val deploymentSeed: Int = random.nextInt()
   private val learningRandom = new Random(RandomAdaptor.createAdaptor(new Well19937c(random.nextLong())))
   private val redeployment = Redeployment(environment, box, deploymentSeed)
-  private var episode = MobileEpisode(config, 0, 0.0)
+  private var episode = newEpisode(0, 0.0)
   private var motionRandom: RandomGenerator = new Well19937c(motionSeed)
   private var motion = NodeMotion.forEpisode(config, 0, motionRandom, box.width)
   private var sources = new Well19937c(sourceSeed)
@@ -78,8 +79,12 @@ final class MobileExperiment[T, P <: Position[P]](
         if !complete then observe(time.toDouble))
 
   override def beforeRound(time: Double): Unit = if !complete then observe(time)
+
+  /** Records the decision with its context, observed after the round that changed the node's output. */
   override def decision(state: AgentState, period: Double, time: Double): Unit =
-    if !complete then episode.decision(state, period, time)
+    if !complete then
+      observe(time)
+      episode.decision(state, period, time, observer.contextOf(state.me))
 
   override protected def react(): Unit =
     val now = environment.getSimulation.getTime.toDouble
@@ -91,7 +96,7 @@ final class MobileExperiment[T, P <: Position[P]](
         if !halfwayPassed && now + ClockTolerance >= episode.start + config.episodeLength / 2.0 then
           halfwayEvent()
           halfwayPassed = true
-        if halfwayPassed && regionStops(now) then moving = Some(Set.empty)
+        if halfwayPassed then followMotionWindow(now)
         observe(now)
         if math.abs((now - episode.start) % FrameInterval) < ClockTolerance then recordFrame(now)
         if math.abs(now - math.rint(now)) < ClockTolerance then snapshots.observe(now)
@@ -108,7 +113,7 @@ final class MobileExperiment[T, P <: Position[P]](
       if config.evaluationSeed.isEmpty && !config.warmStart then
         redeployment.redeploy(redeployment.positionsFor(next))
         confineNodes()
-      episode = MobileEpisode(config, next, now)
+      episode = newEpisode(next, now)
       observer.forget()
       motionRandom = new Well19937c(motionSeed + next)
       motion = NodeMotion.forEpisode(config, next, motionRandom, box.width)
@@ -118,6 +123,9 @@ final class MobileExperiment[T, P <: Position[P]](
       moving = movingAtStart(next)
       chooseSource()
       observe(now)
+
+  private def newEpisode(index: Int, start: Double): MobileEpisode =
+    MobileEpisode(config, index, start, () => observer.costScale)
 
   private def activeWidth: Double =
     if config.isTraining(episode.index) || config.evaluationSeed.isEmpty then box.width
@@ -170,23 +178,28 @@ final class MobileExperiment[T, P <: Position[P]](
     }
     network.topologyChanged()
 
-  /** Who moves when an episode starts: every node (None), a region, or nobody until a region starts halfway. */
+  /** Who moves when an episode starts: every node (None), a region, or nobody until a halfway event moves them. */
   private def movingAtStart(index: Int): Option[Set[Int]] = config.eventAt(index) match
     case EpisodeEvent.SourceSwitch => None
-    case EpisodeEvent.RegionStartsMoving => Some(Set.empty)
+    case EpisodeEvent.RegionStartsMoving | EpisodeEvent.SourceSwitchThenMotion => Some(Set.empty)
     case EpisodeEvent.SourceSwitchWhileRegionMoves => Some(movingRegion())
 
   private def halfwayEvent(): Unit = config.eventAt(episode.index) match
-    case EpisodeEvent.SourceSwitch | EpisodeEvent.SourceSwitchWhileRegionMoves =>
+    case EpisodeEvent.SourceSwitch | EpisodeEvent.SourceSwitchWhileRegionMoves | EpisodeEvent.SourceSwitchThenMotion =>
       if config.sourceChanges then
         if config.blockAt(episode.index) == BuildingBlock.LeaderElection then removeLeader()
         else chooseSource()
     case EpisodeEvent.RegionStartsMoving => moving = Some(movingRegion())
 
-  /** Whether a region that started moving halfway has moved for the configured duration. */
-  private def regionStops(now: Double): Boolean =
-    config.eventAt(episode.index) == EpisodeEvent.RegionStartsMoving &&
-      now + ClockTolerance >= episode.start + config.episodeLength / 2.0 + config.motionDuration
+  /** In the motion window of the episode ([[MobilityConfig.motionWindowAt]]) every node of a composite episode moves;
+    * after it, no node moves.
+    */
+  private def followMotionWindow(now: Double): Unit = config.motionWindowAt(episode.index).foreach { window =>
+    if now + ClockTolerance >= episode.start + window.end then moving = Some(Set.empty)
+    else if config.eventAt(episode.index) == EpisodeEvent.SourceSwitchThenMotion &&
+      now + ClockTolerance >= episode.start + window.start
+    then moving = None
+  }
 
   /** The nodes nearest a centre drawn from the motion stream of the episode. */
   private def movingRegion(): Set[Int] =
@@ -265,6 +278,9 @@ final class MobileExperiment[T, P <: Position[P]](
       PositionHeader,
       positionRows
     )
+    val diagnostics = learner.trainingDiagnostics
+    if diagnostics.nonEmpty then
+      Csv.write(config.directory, s"${config.runName}_training.csv", TrainingDiagnostic.Header, diagnostics.map(_.row))
 end MobileExperiment
 
 object MobileExperiment:

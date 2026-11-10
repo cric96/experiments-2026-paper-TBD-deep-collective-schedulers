@@ -21,7 +21,17 @@ variables:
   # Variants of the training and of the scenario; the defaults are the original mobile experiment.
   completeReplay: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
   # What the decisions of the learners 0 and 1 pay for while they train (it.unibo.mobility.CostSignal).
-  costSignal: { type: ArbitraryVariable, parameters: ["Error", ["Error", "Staleness", "Neighbourhood"]] }
+  costSignal: { type: ArbitraryVariable, parameters: ["Error", ["Error", "Staleness", "Neighbourhood", "Network"]] }
+  # The network cost (costSignal Network, with trainingTolerances 0.0): how much less the error of a node one hop
+  # farther weighs (1: every node of the component alike, 0: the node's own error only), and the discount per second of
+  # the cost paid within a sleep (the gamma of the learners; 1: undiscounted).
+  spatialDiscount: { type: ArbitraryVariable, parameters: [1.0, [1.0, 0.75, 0.5, 0.0]] }
+  costDiscount: { type: ArbitraryVariable, parameters: [0.9, [0.9, 1.0]] }
+  # Whether the critics of the learners 0 and 1 also see what the experiment measures of each decision on the ground
+  # truth (it.unibo.learning.abstractions.CriticContext); their actors never do.
+  privilegedCritic: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
+  # Whether the learners 0 and 1 diagnose their networks after every training session (<run>_training.csv).
+  trainingDiagnostics: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
   lossScale: { type: ArbitraryVariable, parameters: [500.0, [500.0, 50.0]] }
   # Seconds for which holding the whole loss scale costs a decision as much as a round at beta 0.5
   # (MobilityConfig.costReferenceTime), and the tolerances (m) the training costs are measured with (comma-separated).
@@ -55,10 +65,14 @@ variables:
   baselineMaxPeriod: { type: ArbitraryVariable, parameters: [5.0, [5.0]] }
   # What happens halfway through the evaluation episodes, and the cycle of the training ones (comma-separated).
   episodeEvent: { type: ArbitraryVariable, parameters: ["SourceSwitch", ["SourceSwitch", "RegionStartsMoving", "SourceSwitchWhileRegionMoves"]] }
-  trainingEvents: { type: ArbitraryVariable, parameters: ["SourceSwitch", ["SourceSwitch", "SourceSwitch,RegionStartsMoving,RegionStartsMoving", "SourceSwitchWhileRegionMoves"]] }
+  trainingEvents: { type: ArbitraryVariable, parameters: ["SourceSwitch", ["SourceSwitch", "SourceSwitch,RegionStartsMoving,RegionStartsMoving", "SourceSwitchWhileRegionMoves", "SourceSwitchThenMotion"]] }
   movingShare: { type: ArbitraryVariable, parameters: [0.5, [0.5]] }
   # How long (s) a region that starts moving halfway keeps moving; infinite: until the episode ends.
   motionDuration: { type: ArbitraryVariable, parameters: [.inf, [.inf, 50.0]] }
+  # A composite episode (SourceSwitchThenMotion) moves every node from this many seconds after halfway; the training
+  # episodes move for trainingMotionDuration seconds when positive (motionDuration otherwise).
+  motionDelay: { type: ArbitraryVariable, parameters: [0.0, [0.0, 50.0]] }
+  trainingMotionDuration: { type: ArbitraryVariable, parameters: [-1.0, [-1.0, 30.0]] }
   neighbourSpeed: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
   # Blank the base features that assume the gradient's semantics (residual, children, relative order).
   programAgnostic: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
@@ -92,7 +106,10 @@ variables:
         balanceScenarios = balanceScenarios.as[Number].intValue() != 0,
         trainingSpeeds = trainingSpeeds.as[String].split(",").toSeq.map(_.toDouble),
         trainingTolerances = trainingTolerances.as[String].split(",").toSeq.map(_.toDouble),
-        costReferenceTime = costReferenceTime.as[Double]
+        costReferenceTime = costReferenceTime.as[Double],
+        spatialDiscount = spatialDiscount.as[Double], costDiscount = costDiscount.as[Double],
+        motionDelay = motionDelay.as[Double],
+        trainingMotionDuration = Option(trainingMotionDuration.as[Double]).filter(_ > 0.0)
       )
     language: scala
   environmentBox: &environmentBox
@@ -117,9 +134,11 @@ variables:
       val shape = it.unibo.learning.TradeOff.RewardShape(steadyState.as[Double], intensityGain.as[Double], missingValueIntensity.as[Double], it.unibo.learning.TradeOff.BetaScale.valueOf(betaScale.as[String]));
       val reactive = it.unibo.learning.agents.BaselineTuning.fromOrdinal(tunedBaselines.as[Number].intValue()).periods(beta, shape, baselineMinPeriod.as[Double], baselineMaxPeriod.as[Double]);
       val missing = missingValue.as[Number].intValue() != 0;
+      val privileged = privilegedCritic.as[Number].intValue() != 0;
+      val diagnosed = trainingDiagnostics.as[Number].intValue() != 0;
       algoId.as[Number].intValue() match {
-        case 0 => new OfflineLearnerGNN(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, mobile = true, replayCapacity = capacity, mobileFeatures = features, periodExploration = exploration, mobileEncoding = encoding, finalTrainingMultiplier = (if (multiplier > 0) multiplier else 2), rewardShape = shape, missingValueFeature = missing)
-        case 1 => new OfflineLearnerContinuous(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, mobile = true, replayCapacity = capacity, mobileFeatures = features, periodExploration = exploration, mobileEncoding = encoding, finalTrainingMultiplier = (if (multiplier > 0) multiplier else 3), rewardShape = shape, missingValueFeature = missing)
+        case 0 => new OfflineLearnerGNN(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, mobile = true, replayCapacity = capacity, mobileFeatures = features, periodExploration = exploration, mobileEncoding = encoding, finalTrainingMultiplier = (if (multiplier > 0) multiplier else 2), rewardShape = shape, missingValueFeature = missing, privilegedCritic = privileged, diagnosed = diagnosed)
+        case 1 => new OfflineLearnerContinuous(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, mobile = true, replayCapacity = capacity, mobileFeatures = features, periodExploration = exploration, mobileEncoding = encoding, finalTrainingMultiplier = (if (multiplier > 0) multiplier else 3), rewardShape = shape, missingValueFeature = missing, privilegedCritic = privileged, diagnosed = diagnosed)
         case 2 => new HeuristicAdaptiveAgent(Seq(0.5, 1.0, 2.0, 3.0, 4.0, 5.0), beta)
         case 8 => new OfflineLearnerContinuous(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, inspectionEnabled = false, rewardShape = shape, missingValueFeature = missing)
         case 9 => new OfflineLearnerGNN(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, rewardShape = shape, missingValueFeature = missing)

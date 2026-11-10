@@ -1,11 +1,11 @@
 package it.unibo.learning.agents
 
+import ai.djl.ndarray.types.Shape
 import ai.djl.ndarray.{NDArray, NDManager}
 import ai.djl.nn.{Activation, SequentialBlock}
 import it.unibo.learning.TradeOff
-import it.unibo.learning.abstractions.{AgentState, Trajectory}
+import it.unibo.learning.abstractions.{AgentState, CriticContext, Trajectory}
 import it.unibo.learning.agents.OfflineLearnerContinuous.*
-import it.unibo.learning.agents.offline.BatchTensors.{column, rows}
 import it.unibo.learning.agents.offline.*
 import it.unibo.learning.encoding.{MissingValue, MobileEncoding, MobileFeatures, SpatialTemporal}
 import it.unibo.mobility.MobileObjective
@@ -16,7 +16,9 @@ import java.io.File
 
 /** Offline TD3 over the spatial-temporal state, conditioned on the trade-off weight β: twin critics with clipped
   * double-Q targets, delayed policy updates and target policy smoothing ([[TwinDelayed]]); the actor outputs a
-  * continuous wake-up period in [`min`, `max`].
+  * continuous wake-up period in [`min`, `max`]. A `privilegedCritic` also sees what the mobile experiment measured of
+  * each decision on the ground truth ([[CriticContext]]); the actor never does. A `diagnosed` learner diagnoses its
+  * networks after every training session ([[TrainingDiagnostics]]).
   */
 final class OfflineLearnerContinuous(
     min: Double,
@@ -39,7 +41,9 @@ final class OfflineLearnerContinuous(
     periodExploration: PeriodExploration = PeriodExploration.Uniform,
     mobileEncoding: Boolean = true,
     rewardShape: TradeOff.RewardShape = TradeOff.RewardShape(),
-    missingValueFeature: Boolean = false
+    missingValueFeature: Boolean = false,
+    privilegedCritic: Boolean = false,
+    diagnosed: Boolean = false
 ) extends EpisodicOfflineLearner[ContinuousTransition](
       randomKey,
       weight,
@@ -51,6 +55,8 @@ final class OfflineLearnerContinuous(
     if mobile && mobileEncoding then MobileEncoding.featureDim(mobileFeatures)
     else if missingValueFeature then stateDim + 1
     else stateDim
+  require(!privilegedCritic || mobile, "Only the mobile experiment measures the context of a privileged critic")
+  private val contextDim: Int = if privilegedCritic then CriticContext.Size else 0
   private val actionScaler: MinMaxActionScaler = MinMaxActionScaler(min, max)
   private val networkSeed: Int = LearnerSeeds.networks(randomKey, weight)
   private val actor: TorchNetwork[SequentialBlock] = actorNetwork("actor", seedOffset = 1)
@@ -76,9 +82,16 @@ final class OfflineLearnerContinuous(
       seed = networkSeed + seedOffset
     )
 
-  /** A critic takes the state followed by the scaled action. */
+  /** A critic takes the state followed by the scaled action (and by the context, if privileged). */
   private def criticNetwork(name: String, seedOffset: Int): TorchNetwork[SequentialBlock] =
-    TorchNetwork.createMLP(name, inputDim + 1, Seq(hiddenSize, hiddenSize), 1, lr = lr, seed = networkSeed + seedOffset)
+    TorchNetwork.createMLP(
+      name,
+      inputDim + 1 + contextDim,
+      Seq(hiddenSize, hiddenSize),
+      1,
+      lr = lr,
+      seed = networkSeed + seedOffset
+    )
 
   override def policy: AgentState => Double = policyForWeight(weight)
 
@@ -112,6 +125,9 @@ final class OfflineLearnerContinuous(
   private def rewardIntensity(relabelled: RelabelledStep): Double =
     rewardShape.intensity(relabelled.intensity, !MissingValue.of(relabelled.step.state))
 
+  /** A measured cost was divided by the cost scale, so the energy is divided by it too: the same policy, with values of
+    * order one.
+    */
   private def toTransition(relabelled: RelabelledStep): ContinuousTransition =
     val period = relabelled.step.action
     ContinuousTransition(
@@ -119,42 +135,52 @@ final class OfflineLearnerContinuous(
       scaledAction = actionScaler.scale(period),
       reward = relabelled.errorIntegral
         .fold(TradeOff.offlineReward(rewardIntensity(relabelled), period, relabelled.beta, min, max, rewardShape))(
-          cost => MobileObjective.reward(cost, relabelled.energyCost, relabelled.beta)
+          cost => MobileObjective.reward(cost, relabelled.energyCost / relabelled.costScale, relabelled.beta)
         )
         .toFloat,
       nextState = relabelled.nextState,
       terminal = relabelled.terminalFlag,
       discountFactor = relabelled.discount,
-      deferredBeta = relabelled.deferredBeta
+      deferredBeta = relabelled.deferredBeta,
+      context = relabelled.context,
+      nextContext = relabelled.nextContext
     )
 
   override protected def trainOn(batch: Vector[ContinuousTransition], manager: NDManager): Unit =
-    val tensors = ContinuousBatch(batch, manager)
+    val tensors = ContinuousBatch(batch, manager, privilegedCritic)
     val targets = clippedDoubleQTargets(tensors)
-    val stateActions = tensors.states.concat(tensors.actions, 1)
+    val stateActions = withAction(tensors.states, tensors.actions, tensors.contexts)
     Seq(critic1, critic2).foreach { critic =>
       critic.trainStep(TorchNetwork.smoothL1Loss(critic.forward(stateActions, training = true), targets))
     }
-    policyUpdates.afterCriticUpdate(updatePolicy(tensors.states))
+    policyUpdates.afterCriticUpdate(updatePolicy(tensors))
 
   /** Trains the actor against the first critic, then moves every target network towards its online network. */
-  private def updatePolicy(states: NDArray): Unit =
-    critic1.withFrozenParameters(actor.trainStep(actorLoss(states)))
+  private def updatePolicy(tensors: ContinuousBatch): Unit =
+    critic1.withFrozenParameters(actor.trainStep(actorLoss(tensors)))
     targetCritic1.softUpdateFrom(critic1, TargetNetworks.UpdateRate)
     targetCritic2.softUpdateFrom(critic2, TargetNetworks.UpdateRate)
     targetActor.softUpdateFrom(actor, TargetNetworks.UpdateRate)
 
   /** r + γ^Δt · min(Q1_target, Q2_target)(s', π_target(s') + clipped noise). */
   private def clippedDoubleQTargets(tensors: ContinuousBatch): NDArray =
-    val nextActions = TwinDelayed.smoothed(targetActor.evaluate(tensors.nextStates), random)
-    val nextStateActions = tensors.nextStates.concat(nextActions, 1)
+    doubleQTargets(tensors, TwinDelayed.smoothed(targetActor.evaluate(tensors.nextStates), random))
+
+  /** r + γ^Δt · min(Q1_target, Q2_target)(s', `nextActions`). */
+  private def doubleQTargets(tensors: ContinuousBatch, nextActions: NDArray): NDArray =
+    val nextStateActions = withAction(tensors.nextStates, nextActions, tensors.nextContexts)
     val nextValues = targetCritic1.evaluate(nextStateActions).minimum(targetCritic2.evaluate(nextStateActions))
     (tensors.rewards + nextValues * tensors.discounts * (-tensors.terminals + 1.0f)).stopGradient()
 
   /** The actor maximizes the first critic's value of its own actions. */
-  private def actorLoss(states: NDArray): NDArray =
-    val actions = actor.forward(states, training = true)
-    -critic1.forward(states.concat(actions, 1), training = true).mean()
+  private def actorLoss(tensors: ContinuousBatch): NDArray =
+    val actions = actor.forward(tensors.states, training = true)
+    -critic1.forward(withAction(tensors.states, actions, tensors.contexts), training = true).mean()
+
+  /** The (B × 1) actions, and the contexts of a privileged critic, after the states. */
+  private def withAction(states: NDArray, actions: NDArray, contexts: Option[NDArray]): NDArray =
+    val stateActions = states.concat(actions, 1)
+    contexts.fold(stateActions)(stateActions.concat(_, 1))
 
   override protected def onTrained(): Unit =
     fastActor = actor.snapshotFastMLP(useTanh = true)
@@ -164,6 +190,35 @@ final class OfflineLearnerContinuous(
     then
       ActorInspection(actor, critic1, actionScaler, stateDim, inspectionDirectory)
         .save(transitions.oldest(ActorInspection.SamplesPerRegime).map(_.state), weight)
+
+  override protected def diagnosticProbe: Option[DiagnosticProbe[ContinuousTransition]] = Option.when(diagnosed)(Probe)
+
+  /** The networks seen by the diagnostics: the first critic already values the scalarized objective. */
+  private object Probe extends DiagnosticProbe[ContinuousTransition]:
+    private val betaOfFeature: Map[Float, Double] =
+      Relabelling
+        .targetWeights(weight, rewardShape.scale.counterfactualWeights)
+        .map(beta => encodedBeta(beta) -> beta)
+        .toMap
+
+    override val grid: Seq[Double] = TrainingDiagnostics.grid(min, max)
+
+    override def betaOf(transition: ContinuousTransition): Option[Double] =
+      transition.deferredBeta.flatMap(beta => betaOfFeature.get(beta.value))
+
+    override def probe(batch: Vector[ContinuousTransition], manager: NDManager): ProbedBatch =
+      val tensors = ContinuousBatch(batch, manager, privilegedCritic)
+      def values(actions: NDArray): NDArray = critic1.evaluate(withAction(tensors.states, actions, tensors.contexts))
+      def at(period: Double): Seq[Double] =
+        values(manager.full(new Shape(batch.size.toLong, 1), actionScaler.scale(period))).toFloatArray.toSeq
+          .map(_.toDouble)
+      val targets = doubleQTargets(tensors, targetActor.evaluate(tensors.nextStates))
+      ProbedBatch(
+        TorchNetwork.smoothL1Loss(values(tensors.actions), targets).getFloat().toDouble,
+        actor.evaluate(tensors.states).toFloatArray.toSeq.map(action => actionScaler.unscale(action.toDouble)),
+        grid.map(at)
+      )
+  end Probe
 end OfflineLearnerContinuous
 
 object OfflineLearnerContinuous:
@@ -174,37 +229,3 @@ object OfflineLearnerContinuous:
   /** Seed of the run whose final policy is inspected and exported. */
   val InspectedRun: Double = 2.0
   val RunTolerance: Double = 1e-6
-
-  final case class ContinuousTransition(
-      state: Array[Float],
-      scaledAction: Float,
-      reward: Float,
-      nextState: Array[Float],
-      terminal: Float,
-      discountFactor: Float,
-      deferredBeta: Option[DeferredBeta] = None
-  ):
-    def conditionedState: Array[Float] = DeferredBeta.conditioned(state, deferredBeta)
-    def conditionedNextState: Array[Float] = DeferredBeta.conditioned(nextState, deferredBeta)
-
-  /** A batch of continuous transitions as tensors; the scalar fields are columns. */
-  final private case class ContinuousBatch(
-      states: NDArray,
-      nextStates: NDArray,
-      actions: NDArray,
-      rewards: NDArray,
-      terminals: NDArray,
-      discounts: NDArray
-  )
-
-  private object ContinuousBatch:
-    def apply(batch: Vector[ContinuousTransition], manager: NDManager): ContinuousBatch =
-      ContinuousBatch(
-        states = rows(batch.map(_.conditionedState), manager),
-        nextStates = rows(batch.map(_.conditionedNextState), manager),
-        actions = column(batch.map(_.scaledAction), manager),
-        rewards = column(batch.map(_.reward), manager),
-        terminals = column(batch.map(_.terminal), manager),
-        discounts = column(batch.map(_.discountFactor), manager)
-      )
-end OfflineLearnerContinuous

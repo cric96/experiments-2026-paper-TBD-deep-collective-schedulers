@@ -2,6 +2,7 @@ package it.unibo.alchemist.model.reactions
 
 import it.unibo.alchemist.Molecules.*
 import it.unibo.alchemist.model.{Environment, Node, Position}
+import it.unibo.mobility.SpatialWeights
 import it.unibo.scafi.{BuildingBlock, GroundTruth, GroundTruths, Sensors, Topology}
 
 import scala.jdk.CollectionConverters.*
@@ -16,6 +17,7 @@ final class NetworkView[T, P <: Position[P]](
     block: () => BuildingBlock
 ):
   private var neighbourhoods: Option[Map[Int, Seq[(Int, Double)]]] = None
+  private var weights: Option[(Double, SpatialWeights)] = None
   private var sourceIds: Option[Set[Int]] = None
   private var reachability: Option[Map[Int, Double]] = None
   private var truths: Option[Map[Int, Double]] = None
@@ -27,6 +29,7 @@ final class NetworkView[T, P <: Position[P]](
   /** Forgets what depends on the positions and on the population, and on the sources. */
   def topologyChanged(): Unit =
     neighbourhoods = None
+    weights = None
     sourcesChanged()
 
   /** Forgets what depends on the sources: their ids, the nodes they reach and the ground truths. */
@@ -49,6 +52,15 @@ final class NetworkView[T, P <: Position[P]](
   }
 
   def neighboursOf(id: Int): Seq[(Int, Double)] = links.getOrElse(id, Seq.empty)
+
+  /** The weights `discount`^hop between every pair of nodes of the current links ([[SpatialWeights]]). */
+  def spatialWeights(discount: Double): SpatialWeights = weights
+    .filter(_._1 == discount)
+    .fold {
+      val calculated = SpatialWeights(links.view.mapValues(_.map(_._1)).toMap, discount)
+      weights = Some(discount -> calculated)
+      calculated
+    }(_._2)
 
   /** The ids of the current sources. */
   def sources: Set[Int] = sourceIds.getOrElse {

@@ -58,6 +58,9 @@ VARIANT_LABELS = {
     "legacy-full-range-reactive": "Full-range β, reactive",
     "error-full-range": "Full-range β, error objective",
     "neighbourhood-error-full-range": "Full-range β, neighbourhood error",
+    "network-error-full-range": "Full-range β, network error",
+    "network-error-discount-0.5": "Full-range β, network error (ρ 0.5)",
+    "network-error-discount-0.75": "Full-range β, network error (ρ 0.75)",
 }
 PROGRAMS = {0: "Gradient", 1: "Hop count", 2: "Broadcast", 3: "Collect", 4: "Election"}
 PHASES = {"bootstrap": "Start-up\n0–40 s", "quiet": "Stable\n40–100 s", "event": "Event\n100–150 s",

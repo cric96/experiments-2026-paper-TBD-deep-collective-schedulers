@@ -8,7 +8,11 @@ import java.io.File
   * `costReferenceTime` seconds: holding the whole loss scale that long costs as much as a round at β 0.5. `event`
   * happens halfway through the evaluation episodes, `trainingEvents` cycle through the training ones; `movingShare` is
   * the share of the nodes of a region that moves, for `motionDuration` seconds once a region starts moving halfway (for
-  * ever by default).
+  * ever by default). In a composite episode ([[EpisodeEvent.SourceSwitchThenMotion]]) every node starts moving
+  * `motionDelay` seconds after halfway; the training episodes move for `trainingMotionDuration` seconds when given (the
+  * evaluation ones for `motionDuration`). The network cost ([[CostSignal.Network]]) weighs the errors `spatialDiscount`
+  * less at every hop, and a decision pays it discounted by `costDiscount` per second of its sleep, the γ of the
+  * learners.
   */
 final case class MobilityConfig(
     seed: Int,
@@ -40,7 +44,11 @@ final case class MobilityConfig(
     evaluationNodes: Int = 100,
     targetProgram: it.unibo.scafi.BuildingBlock = it.unibo.scafi.BuildingBlock.Gradient,
     balanceScenarios: Boolean = false,
-    costReferenceTime: Double = MobileObjective.ReferenceTime
+    costReferenceTime: Double = MobileObjective.ReferenceTime,
+    spatialDiscount: Double = 1.0,
+    costDiscount: Double = MobilityConfig.CostDiscount,
+    motionDelay: Double = 0.0,
+    trainingMotionDuration: Option[Double] = None
 ):
   require(diffusion >= 0.0 && diffusion.isFinite && tolerance >= 0.0 && tolerance.isFinite)
   require(beta >= 0.0 && beta <= 1.0 && MobilityConfig.Algorithms.contains(algorithm))
@@ -63,8 +71,14 @@ final case class MobilityConfig(
   require(trainingTolerances.nonEmpty && trainingTolerances.forall(value => value >= 0.0 && value.isFinite))
   require(lossScale > 0.0 && lossScale.isFinite && speed >= 0.0 && speed.isFinite)
   require(costReferenceTime > 0.0 && costReferenceTime.isFinite)
+  require(spatialDiscount >= 0.0 && spatialDiscount <= 1.0 && costDiscount > 0.0 && costDiscount <= 1.0)
+  require(
+    costSignal != CostSignal.Network || trainingTolerances == Seq(0.0),
+    "The network cost charges the losses of the nodes without tolerance: train with tolerance 0 only"
+  )
   require(trainingSpeeds.nonEmpty && trainingSpeeds.forall(value => value >= 0.0 && value.isFinite))
   require(trainingEvents.nonEmpty && movingShare > 0.0 && movingShare <= 1.0 && motionDuration > 0.0)
+  require(motionDelay >= 0.0 && motionDelay.isFinite && trainingMotionDuration.forall(_ > 0.0))
 
   require(evaluationNodes > 1)
   require(evaluationSeed.isEmpty || trainingEpisodes > 0, "Independent protocol requires a training episode")
@@ -94,6 +108,22 @@ final case class MobilityConfig(
   /** What happens halfway through `episode`: the training events cycle like the training levels. */
   def eventAt(episode: Int): EpisodeEvent =
     if isTraining(episode) then trainingEvents(episode % trainingEvents.size) else event
+
+  /** How long the nodes that a halfway event sets in motion move in `episode`. */
+  def motionDurationAt(episode: Int): Double =
+    if isTraining(episode) then trainingMotionDuration.getOrElse(motionDuration) else motionDuration
+
+  /** When a halfway event moves the nodes of `episode`: a region from halfway, every node of a composite episode from
+    * `motionDelay` after halfway; none for the events whose motion does not depend on time.
+    */
+  def motionWindowAt(episode: Int): Option[MotionWindow] =
+    val halfway = episodeLength / 2.0
+    eventAt(episode) match
+      case EpisodeEvent.RegionStartsMoving => Some(MotionWindow(halfway, halfway + motionDurationAt(episode)))
+      case EpisodeEvent.SourceSwitchThenMotion =>
+        Some(MotionWindow(halfway + motionDelay, halfway + motionDelay + motionDurationAt(episode)))
+      case EpisodeEvent.SourceSwitch | EpisodeEvent.SourceSwitchWhileRegionMoves => None
+
   def toleranceAt(episode: Int): Double =
     if isTraining(episode) then trainingTolerances(episode % trainingTolerances.size) else tolerance
   def tolerances: Seq[Double] = (trainingTolerances :+ tolerance).distinct
@@ -106,6 +136,7 @@ final case class MobilityConfig(
       warmStart -> "_warm",
       (event == EpisodeEvent.RegionStartsMoving) -> "_region",
       (event == EpisodeEvent.SourceSwitchWhileRegionMoves) -> "_regionmoves",
+      (event == EpisodeEvent.SourceSwitchThenMotion) -> "_switchthenmotion",
       motionDuration.isFinite -> s"_for$motionDuration"
     ).collect { case (true, suffix) => suffix }
     val protocol =
@@ -114,6 +145,9 @@ final case class MobilityConfig(
 end MobilityConfig
 
 object MobilityConfig:
+  /** Discount per second of the costs paid within a sleep: the γ of the offline learners. */
+  val CostDiscount: Double = 0.9
+
   val TransferMLP: Int = 8
   val TransferGNN: Int = 9
   val FastestBaseline: Int = 10

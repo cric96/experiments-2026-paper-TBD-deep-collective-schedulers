@@ -1,6 +1,7 @@
 package it.unibo.alchemist.model.reactions
 
-import it.unibo.alchemist.model.reactions.NetworkObserver.{sameOutput, Observation}
+import it.unibo.alchemist.model.reactions.NetworkObserver.{contextOf, sameOutput, Observation}
+import it.unibo.learning.abstractions.CriticContext
 import it.unibo.mobility.NodeObservation
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -26,5 +27,19 @@ class NetworkObserverSpec extends AnyFlatSpec with Matchers:
     observation.sees(10.25, 3L, Set(1, 2)) shouldBe false
     observation.sees(10.0, 4L, Set(1, 2)) shouldBe false
     observation.sees(10.0, 3L, Set(1)) shouldBe false
+  }
+
+  "The context of a decision" should "measure the node's own loss, its charged cost and the network's mean loss" in {
+    val scale = 400.0
+    val observations = Map(
+      1 -> NodeObservation(100.0, reachable = true, cost = 600.0),
+      2 -> NodeObservation(Double.PositiveInfinity, reachable = false, cost = Double.PositiveInfinity),
+      3 -> NodeObservation(0.0, reachable = true, cost = 0.0),
+      4 -> NodeObservation(200.0, reachable = true, cost = 200.0)
+    )
+    val networkLoss = (0.25 + 1.0 + 0.0 + 0.5) / 4
+    contextOf(1, observations, scale) shouldBe Some(CriticContext(0.25, 1.5, networkLoss))
+    contextOf(2, observations, scale) shouldBe Some(CriticContext(1.0, 1.0, networkLoss))
+    contextOf(5, observations, scale) shouldBe None
   }
 end NetworkObserverSpec

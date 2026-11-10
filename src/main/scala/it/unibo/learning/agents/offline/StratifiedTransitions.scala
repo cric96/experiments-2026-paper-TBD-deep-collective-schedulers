@@ -55,6 +55,14 @@ final class StratifiedTransitions[T](capacityPerRegime: Int = Int.MaxValue):
       val unstableHalf = draw(unstable, batchSize / 2, random)
       unstableHalf ++ draw(stable, batchSize - batchSize / 2, random)
 
+  /** Samples with replacement `count` transitions of one regime, spread over the scenarios; none if it is empty. */
+  def sampleRegime(count: Int, random: Random, unstable: Boolean): Vector[T] =
+    if scenarios.nonEmpty then
+      scenarios.values.toVector.flatMap(_.sampleRegime(count / scenarios.size, random, unstable))
+    else
+      val regime = if unstable then this.unstable else stable
+      if regime.isEmpty then Vector.empty else draw(regime, count, random)
+
   /** The first `perRegime` transitions of each regime, unstable ones first. */
   def oldest(perRegime: Int): Vector[T] =
     if scenarios.nonEmpty then scenarios.values.toVector.flatMap(_.oldest(perRegime))

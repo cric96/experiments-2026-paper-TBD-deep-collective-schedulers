@@ -25,7 +25,8 @@ class MobileSimulationSpec extends AnyFlatSpec with Matchers:
       diffusion: Double = 1.0,
       movementInterval: Double = 0.25,
       variant: Map[String, Any] = Map.empty,
-      scenario: MobilityConfig => MobilityConfig = identity
+      scenario: MobilityConfig => MobilityConfig = identity,
+      episodeLength: Double = 10.0
   ): (MobilityConfig, Vector[Vector[String]]) =
     val config = scenario(
       MobilityConfig(
@@ -35,7 +36,7 @@ class MobileSimulationSpec extends AnyFlatSpec with Matchers:
         movementInterval = movementInterval,
         trainingEpisodes = 1,
         episodes = 2,
-        episodeLength = 10.0,
+        episodeLength = episodeLength,
         directory = Files.createTempDirectory("mobile-simulation").toFile
       )
     )
@@ -48,7 +49,7 @@ class MobileSimulationSpec extends AnyFlatSpec with Matchers:
         "movementInterval" -> movementInterval,
         "trainingEpisodes" -> 1,
         "episodes" -> 2,
-        "episodeLength" -> 10.0,
+        "episodeLength" -> episodeLength,
         "stepsPerEpisode" -> 1,
         "width" -> 100.0,
         "spacing" -> 50.0,
@@ -159,6 +160,60 @@ class MobileSimulationSpec extends AnyFlatSpec with Matchers:
     )
     run(0, variant = variant)
     run(1, variant = variant)
+  }
+
+  it should "train on the error of the network with privileged critics" in {
+    val variant = Map(
+      "mobileEncoding" -> 0,
+      "missingValue" -> 1,
+      "betaScale" -> "FullRange",
+      "costSignal" -> "Network",
+      "spatialDiscount" -> 0.75,
+      "privilegedCritic" -> 1,
+      "trainingDiagnostics" -> 1,
+      "costReferenceTime" -> 0.25,
+      "trainingTolerances" -> "0.0",
+      "completeReplay" -> 1
+    )
+    val scenario =
+      (config: MobilityConfig) => config.copy(costSignal = CostSignal.Network, trainingTolerances = Seq(0.0))
+    Seq(0, 1).foreach { algorithm =>
+      val (config, _) = run(algorithm, variant = variant, scenario = scenario)
+      val diagnostics = rows(config.directory, s"${config.runName}_training.csv")
+      diagnostics should not be empty
+      diagnostics.map(_.head).distinct shouldBe Vector("0")
+    }
+  }
+
+  it should "switch the source halfway, then move every node for a while after a delay" in {
+    val event = EpisodeEvent.SourceSwitchThenMotion
+    val variant = Map(
+      "episodeEvent" -> event.toString,
+      "trainingEvents" -> event.toString,
+      "motionDelay" -> 2.0,
+      "motionDuration" -> 2.0
+    )
+    val (config, positions) = run(
+      3,
+      variant = variant,
+      episodeLength = 20.0,
+      scenario = _.copy(event = event, trainingEvents = Seq(event), motionDelay = 2.0, motionDuration = 2.0)
+    )
+    val evaluation = positions.filter(_(0) == "1")
+    def at(time: Double): Map[String, (String, String)] =
+      evaluation.filter(_(1).toDouble == time).map(row => row(2) -> (row(3), row(4))).toMap
+    def sources(before: Boolean): Set[String] =
+      evaluation
+        .filter(row => row(1).toDouble < config.episodeLength / 2.0 == before && row(5) == "true")
+        .map(_(2))
+        .toSet
+    val window = config.motionWindowAt(1).getOrElse(fail("No motion window"))
+    val frames = evaluation.map(_(1).toDouble).distinct
+    frames.filter(_ <= window.start).map(at).distinct should have size 1
+    at(window.end) should not be at(window.start)
+    frames.filter(_ >= window.end).map(at).distinct should have size 1
+    sources(before = true).size shouldBe 1
+    sources(before = false) should not be sources(before = true)
   }
 
   it should "run Trickle and the gradual controller within the configured periods" in {

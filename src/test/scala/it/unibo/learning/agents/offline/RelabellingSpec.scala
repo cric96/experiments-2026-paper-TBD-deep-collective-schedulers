@@ -1,7 +1,7 @@
 package it.unibo.learning.agents.offline
 
 import it.unibo.learning.TradeOff
-import it.unibo.learning.abstractions.{AgentState, MobileOutcome, Step}
+import it.unibo.learning.abstractions.{AgentState, CriticContext, MobileOutcome, Step, Stratification}
 import it.unibo.learning.encoding.InstabilityIntensity
 import it.unibo.testing.AgentStates.*
 import org.scalatest.flatspec.AnyFlatSpec
@@ -94,5 +94,56 @@ class RelabellingSpec extends AnyFlatSpec with Matchers:
       Relabelling.relabel(Seq(step), ownWeight, gamma, encode, betaIndex, mobile = true, scale, scale.feature)
     mobile.map(_.beta).distinct shouldBe (ownWeight +: scale.counterfactualWeights).distinct
     mobile.foreach(copy => copy.conditionedState(betaIndex) shouldBe scale.feature(copy.beta))
+  }
+
+  /** A mobile step from `state` that paid `cost`, stratified by `stratification`. */
+  private def mobileStep(state: AgentState, cost: Double, stratification: Stratification): Step =
+    val outcome =
+      MobileOutcome(2.0, Map(0.0 -> cost), stableBackbone, terminal = false, stratification = stratification)
+    Step(state, actionIndex = -1, action = 2.0, reward = 0.0, Some(outcome))
+
+  private def unstable(steps: Step*): Seq[Boolean] =
+    Relabelling
+      .relabel(steps, ownWeight, gamma, encode, betaIndex, mobile = true)
+      .grouped(weightsPerStep)
+      .map(_.map(_.isUnstable).distinct)
+      .toSeq
+      .flatten
+
+  it should "tell an unstable step by its cost" in {
+    unstable(
+      mobileStep(stableBackbone, 0.3, Stratification.ByCost),
+      mobileStep(sourceMovingTowardsMe, 0.0, Stratification.ByCost)
+    ) shouldBe Seq(true, false)
+  }
+
+  it should "tell an unstable step by the regime of the node when the cost is summed over the network" in {
+    val local = Stratification.ByLocalRegime
+    unstable(
+      mobileStep(stableBackbone, 0.3, local),
+      mobileStep(sourceMovingTowardsMe, 0.0, local),
+      mobileStep(isolated, 0.0, local)
+    ) shouldBe Seq(false, true, true)
+  }
+
+  it should "carry the contexts of the critics, shared across the target weights, and the cost scale" in {
+    val outcome = MobileOutcome(
+      2.0,
+      Map(0.0 -> 0.3),
+      stableBackbone,
+      terminal = false,
+      context = CriticContext(0.1, 0.2, 0.3),
+      nextContext = CriticContext(0.4, 0.5, 0.6),
+      costScale = 4.0
+    )
+    val step = Step(sourceMovingTowardsMe, actionIndex = -1, action = 2.0, reward = 0.0, Some(outcome))
+    val mobile = Relabelling.relabel(Seq(step), ownWeight, gamma, encode, betaIndex, mobile = true)
+    mobile.map(_.context).distinct should have size 1
+    mobile.map(_.nextContext).distinct should have size 1
+    mobile.foreach { copy =>
+      copy.context.toSeq shouldBe Seq(0.1f, 0.2f, 0.3f)
+      copy.nextContext.toSeq shouldBe Seq(0.4f, 0.5f, 0.6f)
+      copy.costScale shouldBe 4.0
+    }
   }
 end RelabellingSpec

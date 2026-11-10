@@ -71,4 +71,24 @@ class MobilityConfigSpec extends AnyFlatSpec with Matchers:
       event = EpisodeEvent.SourceSwitchWhileRegionMoves).runName shouldBe
       "seed1_algo0_V1.0_tol5.0_beta0.95_dt0.25_train10_length200.0_sourcetrue_waypoint_warm_regionmoves"
   }
+
+  it should "name the evaluation of a composite episode" in {
+    MobilityConfig(1, 0, event = EpisodeEvent.SourceSwitchThenMotion).runName shouldBe
+      "seed1_algo0_D1.0_tol5.0_beta0.95_dt0.25_train10_length200.0_sourcetrue_switchthenmotion"
+  }
+
+  "The motion window" should "start halfway and last the motion duration when a region starts moving" in {
+    val region = MobilityConfig(1, 0, event = EpisodeEvent.RegionStartsMoving, motionDuration = 50.0)
+    region.motionWindowAt(region.trainingEpisodes) shouldBe Some(MotionWindow(100.0, 150.0))
+    brownian.motionWindowAt(brownian.trainingEpisodes) shouldBe None
+  }
+
+  it should "start a delay after the source switch of a composite episode, and last the training motion duration" in {
+    val composite = MobilityConfig(
+      1, 0, event = EpisodeEvent.RegionStartsMoving, trainingEvents = Seq(EpisodeEvent.SourceSwitchThenMotion),
+      motionDuration = 50.0, motionDelay = 50.0, trainingMotionDuration = Some(30.0)
+    )
+    composite.motionWindowAt(0) shouldBe Some(MotionWindow(150.0, 180.0))
+    composite.motionWindowAt(composite.trainingEpisodes) shouldBe Some(MotionWindow(100.0, 150.0))
+  }
 end MobilityConfigSpec
