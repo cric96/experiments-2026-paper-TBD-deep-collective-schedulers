@@ -216,6 +216,19 @@ class MobileSimulationSpec extends AnyFlatSpec with Matchers:
     sources(before = false) should not be sources(before = true)
   }
 
+  it should "switch the source again at the extra switches of the training episodes" in {
+    val (_, positions) = run(3, variant = Map("extraSwitches" -> "4.0"), scenario = _.copy(extraSwitches = Seq(4.0)))
+    def sources(episode: String, from: Double, to: Double): Set[String] =
+      positions
+        .filter(row => row(0) == episode && row(1).toDouble >= from && row(1).toDouble < to && row(5) == "true")
+        .map(_(2))
+        .toSet
+    val training = Seq((0.0, 4.0), (4.0, 5.0), (6.0, 10.0)).map((from, to) => sources("0", from, to))
+    training.foreach(_ should have size 1)
+    training.sliding(2).foreach(pair => pair(1) should not be pair(0))
+    sources("1", 0.0, 5.0) should have size 1
+  }
+
   it should "run Trickle and the gradual controller within the configured periods" in {
     val period = 1.0
     val tolerance = 0.15

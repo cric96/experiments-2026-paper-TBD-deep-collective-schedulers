@@ -141,8 +141,8 @@ class RelabellingSpec extends AnyFlatSpec with Matchers:
     mobile.map(_.context).distinct should have size 1
     mobile.map(_.nextContext).distinct should have size 1
     mobile.foreach { copy =>
-      copy.context.toSeq shouldBe Seq(0.1f, 0.2f, 0.3f)
-      copy.nextContext.toSeq shouldBe Seq(0.4f, 0.5f, 0.6f)
+      copy.context.toSeq shouldBe Seq(0.1f, 0.2f, 0.3f, 0.0f, 0.0f)
+      copy.nextContext.toSeq shouldBe Seq(0.4f, 0.5f, 0.6f, 0.0f, 0.0f)
       copy.costScale shouldBe 4.0
     }
   }

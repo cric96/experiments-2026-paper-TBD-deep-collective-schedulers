@@ -36,7 +36,8 @@ final private[agents] case class ContinuousBatch(
 )
 
 private[agents] object ContinuousBatch:
-  def apply(batch: Vector[ContinuousTransition], manager: NDManager, privileged: Boolean): ContinuousBatch =
+  /** The tensors of `batch`, with the first `contextSize` features of the contexts if the critics see them. */
+  def apply(batch: Vector[ContinuousTransition], manager: NDManager, contextSize: Int): ContinuousBatch =
     ContinuousBatch(
       states = rows(batch.map(_.conditionedState), manager),
       nextStates = rows(batch.map(_.conditionedNextState), manager),
@@ -44,6 +45,6 @@ private[agents] object ContinuousBatch:
       rewards = column(batch.map(_.reward), manager),
       terminals = column(batch.map(_.terminal), manager),
       discounts = column(batch.map(_.discountFactor), manager),
-      contexts = Option.when(privileged)(rows(batch.map(_.context), manager)),
-      nextContexts = Option.when(privileged)(rows(batch.map(_.nextContext), manager))
+      contexts = Option.when(contextSize > 0)(rows(batch.map(_.context.take(contextSize)), manager)),
+      nextContexts = Option.when(contextSize > 0)(rows(batch.map(_.nextContext.take(contextSize)), manager))
     )

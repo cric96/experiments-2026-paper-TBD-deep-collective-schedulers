@@ -14,7 +14,7 @@ class PrivilegedCriticSpec extends AnyFlatSpec with Matchers:
   /** A trajectory through the fixtures, every decision with its own context and a network cost. */
   private val trajectory: Trajectory =
     fixtures.zip(fixtures.drop(1) :+ fixtures.last).zipWithIndex.map { case ((state, next), index) =>
-      val context = CriticContext(0.1 * index, 0.2 * index, 0.3)
+      val context = CriticContext(0.1 * index, 0.2 * index, 0.3, 0.05 * index, 0.5)
       val outcome = MobileOutcome(
         1.0 + index,
         Map(0.0 -> 0.1 * index),
@@ -49,6 +49,23 @@ class PrivilegedCriticSpec extends AnyFlatSpec with Matchers:
       (privileged, plain) =>
         fixtures.map(privileged.policy) shouldBe fixtures.map(plain.policy)
     }
+
+  it should "train on the rich context too" in {
+    val learners = Seq(
+      OfflineLearnerGNN(0.5, 5.0, 1.0, 0.8, explorationEpisodes = 1, stepsPerEpisode = 4, mobile = true,
+        mobileEncoding = false, rewardShape = shape, missingValueFeature = true, privilegedCritic = true,
+        richContext = true),
+      OfflineLearnerContinuous(0.5, 5.0, 1.0, 0.8, explorationEpisodes = 1, stepsPerEpisode = 4, mobile = true,
+        mobileEncoding = false, rewardShape = shape, missingValueFeature = true, privilegedCritic = true,
+        richContext = true)
+    )
+    learners.foreach { learner =>
+      learner.endEpisode(Seq(trajectory))
+      fixtures.map(learner.policy).foreach(period => period should (be >= 0.5 and be <= 5.0))
+    }
+    an[IllegalArgumentException] should be thrownBy
+      OfflineLearnerGNN(0.5, 5.0, 1.0, 0.8, mobile = true, richContext = true)
+  }
 
   it should "need the measured contexts of the mobile experiment" in {
     an[IllegalArgumentException] should be thrownBy OfflineLearnerGNN(0.5, 5.0, 1.0, 0.8, privilegedCritic = true)

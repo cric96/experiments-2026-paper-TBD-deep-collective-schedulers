@@ -30,8 +30,13 @@ variables:
   # Whether the critics of the learners 0 and 1 also see what the experiment measures of each decision on the ground
   # truth (it.unibo.learning.abstractions.CriticContext); their actors never do.
   privilegedCritic: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
+  # Whether a privileged critic also sees the share of the nodes the field has not reached and the age of the last
+  # change of the network (a rich context).
+  richContext: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
   # Whether the learners 0 and 1 diagnose their networks after every training session (<run>_training.csv).
   trainingDiagnostics: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
+  # How their critics fit the convergence values (it.unibo.learning.agents.offline.ConvergenceLoss): Huber or Squared.
+  convergenceLoss: { type: ArbitraryVariable, parameters: ["Huber", ["Huber", "Squared"]] }
   lossScale: { type: ArbitraryVariable, parameters: [500.0, [500.0, 50.0]] }
   # Seconds for which holding the whole loss scale costs a decision as much as a round at beta 0.5
   # (MobilityConfig.costReferenceTime), and the tolerances (m) the training costs are measured with (comma-separated).
@@ -72,6 +77,16 @@ variables:
   # A composite episode (SourceSwitchThenMotion) moves every node from this many seconds after halfway; the training
   # episodes move for trainingMotionDuration seconds when positive (motionDuration otherwise).
   motionDelay: { type: ArbitraryVariable, parameters: [0.0, [0.0, 50.0]] }
+  # The training episodes also switch the source at these instants (s from their start, comma-separated; none if empty).
+  extraSwitches: { type: ArbitraryVariable, parameters: ["", ["", "50.0"]] }
+  # The discount per second of the learners 0 and 1 (gamma); costDiscount should be the same.
+  gamma: { type: ArbitraryVariable, parameters: [0.9, [0.9, 0.95]] }
+  # How much the learners 0 and 1 add to their measured cost the convergence surrogate of the instability of the node
+  # under the reward shape (it.unibo.learning.agents.offline.HybridConvergence); 0: the measured cost alone.
+  surrogateWeight: { type: ArbitraryVariable, parameters: [0.0, [0.0, 0.1, 0.3, 1.0]] }
+  # If not negative, the weight grows geometrically from surrogateWeight at the lowest beta of the scale to this one at
+  # the highest (it.unibo.learning.agents.offline.SurrogateWeights).
+  highSurrogateWeight: { type: ArbitraryVariable, parameters: [-1.0, [-1.0, 2.0]] }
   trainingMotionDuration: { type: ArbitraryVariable, parameters: [-1.0, [-1.0, 30.0]] }
   neighbourSpeed: { type: ArbitraryVariable, parameters: [0, [0, 1]] }
   # Blank the base features that assume the gradient's semantics (residual, children, relative order).
@@ -109,7 +124,8 @@ variables:
         costReferenceTime = costReferenceTime.as[Double],
         spatialDiscount = spatialDiscount.as[Double], costDiscount = costDiscount.as[Double],
         motionDelay = motionDelay.as[Double],
-        trainingMotionDuration = Option(trainingMotionDuration.as[Double]).filter(_ > 0.0)
+        trainingMotionDuration = Option(trainingMotionDuration.as[Double]).filter(_ > 0.0),
+        extraSwitches = extraSwitches.as[String].split(",").toSeq.filter(_.nonEmpty).map(_.toDouble)
       )
     language: scala
   environmentBox: &environmentBox
@@ -136,9 +152,14 @@ variables:
       val missing = missingValue.as[Number].intValue() != 0;
       val privileged = privilegedCritic.as[Number].intValue() != 0;
       val diagnosed = trainingDiagnostics.as[Number].intValue() != 0;
+      val fitting = it.unibo.learning.agents.offline.ConvergenceLoss.valueOf(convergenceLoss.as[String]);
+      val rich = richContext.as[Number].intValue() != 0;
+      val discount = gamma.as[Number].floatValue();
+      val surrogate = surrogateWeight.as[Double];
+      val highSurrogate = Option(highSurrogateWeight.as[Double]).filter(_ >= 0.0);
       algoId.as[Number].intValue() match {
-        case 0 => new OfflineLearnerGNN(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, mobile = true, replayCapacity = capacity, mobileFeatures = features, periodExploration = exploration, mobileEncoding = encoding, finalTrainingMultiplier = (if (multiplier > 0) multiplier else 2), rewardShape = shape, missingValueFeature = missing, privilegedCritic = privileged, diagnosed = diagnosed)
-        case 1 => new OfflineLearnerContinuous(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, mobile = true, replayCapacity = capacity, mobileFeatures = features, periodExploration = exploration, mobileEncoding = encoding, finalTrainingMultiplier = (if (multiplier > 0) multiplier else 3), rewardShape = shape, missingValueFeature = missing, privilegedCritic = privileged, diagnosed = diagnosed)
+        case 0 => new OfflineLearnerGNN(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, mobile = true, replayCapacity = capacity, mobileFeatures = features, periodExploration = exploration, mobileEncoding = encoding, finalTrainingMultiplier = (if (multiplier > 0) multiplier else 2), rewardShape = shape, missingValueFeature = missing, privilegedCritic = privileged, diagnosed = diagnosed, convergenceLoss = fitting, richContext = rich, gamma = discount, surrogateWeight = surrogate, highSurrogateWeight = highSurrogate)
+        case 1 => new OfflineLearnerContinuous(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, mobile = true, replayCapacity = capacity, mobileFeatures = features, periodExploration = exploration, mobileEncoding = encoding, finalTrainingMultiplier = (if (multiplier > 0) multiplier else 3), rewardShape = shape, missingValueFeature = missing, privilegedCritic = privileged, diagnosed = diagnosed, convergenceLoss = fitting, richContext = rich, gamma = discount, surrogateWeight = surrogate, highSurrogateWeight = highSurrogate)
         case 2 => new HeuristicAdaptiveAgent(Seq(0.5, 1.0, 2.0, 3.0, 4.0, 5.0), beta)
         case 8 => new OfflineLearnerContinuous(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, inspectionEnabled = false, rewardShape = shape, missingValueFeature = missing)
         case 9 => new OfflineLearnerGNN(0.5, 5.0, seed, beta, explorationEpisodes = training, stepsPerEpisode = steps, rewardShape = shape, missingValueFeature = missing)

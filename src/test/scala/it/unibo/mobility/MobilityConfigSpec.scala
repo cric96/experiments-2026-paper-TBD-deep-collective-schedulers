@@ -91,4 +91,26 @@ class MobilityConfigSpec extends AnyFlatSpec with Matchers:
     composite.motionWindowAt(0) shouldBe Some(MotionWindow(150.0, 180.0))
     composite.motionWindowAt(composite.trainingEpisodes) shouldBe Some(MotionWindow(100.0, 150.0))
   }
+
+  "The changes of the network" should "be the start, the halfway event and the motion window of the episode" in {
+    val composite = MobilityConfig(1, 0, trainingEvents = Seq(EpisodeEvent.SourceSwitchThenMotion), motionDelay = 50.0,
+      trainingMotionDuration = Some(30.0))
+    composite.changesAt(0) shouldBe Seq(0.0, 100.0, 150.0, 180.0)
+    Seq(20.0, 120.0, 160.0, 190.0).map(composite.sinceLastChange(0, _)) shouldBe Seq(20.0, 20.0, 10.0, 10.0)
+    MobilityConfig(1, 0, sourceChanges = false).changesAt(0) shouldBe Seq(0.0)
+    MobilityConfig(1, 0, event = EpisodeEvent.RegionStartsMoving).changesAt(10) shouldBe Seq(0.0, 100.0)
+  }
+
+  "The extra source switches" should "happen in the training episodes only, and count as changes of the network" in {
+    val twice = MobilityConfig(1, 0, extraSwitches = Seq(50.0))
+    twice.extraSwitchesAt(0) shouldBe Seq(50.0)
+    twice.extraSwitchesAt(twice.trainingEpisodes) shouldBe empty
+    twice.changesAt(0) shouldBe Seq(0.0, 50.0, 100.0)
+    twice.changesAt(twice.trainingEpisodes) shouldBe Seq(0.0, 100.0)
+  }
+
+  they should "fall within the episode, on a movement tick" in {
+    an[IllegalArgumentException] should be thrownBy MobilityConfig(1, 0, extraSwitches = Seq(250.0))
+    an[IllegalArgumentException] should be thrownBy MobilityConfig(1, 0, extraSwitches = Seq(50.1))
+  }
 end MobilityConfigSpec

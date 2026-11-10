@@ -92,6 +92,13 @@ class TradeOffSpec extends AnyFlatSpec with Matchers:
     TradeOff.RewardShape().scale shouldBe TradeOff.BetaScale.Ratio
   }
 
+  "The convergence surrogate" should "be the convergence pressure of the node times the squared normalized period" in {
+    val shape = TradeOff.RewardShape(steadyStateIntensity = 1.0, intensityGain = 8.0)
+    TradeOff.convergenceSurrogate(intensity = 0.5, period = 0.5, min = 0.5, max = 5.0, shape) shouldBe 0.0
+    TradeOff.convergenceSurrogate(intensity = 0.5, period = 5.0, min = 0.5, max = 5.0, shape) shouldBe 5.0
+    TradeOff.convergenceSurrogate(intensity = 0.0, period = 2.75, min = 0.5, max = 5.0, shape) shouldBe 0.25
+  }
+
   "The urgency of a node" should "be the steady-state pressure plus the scaled instability, at most one" in {
     val shape = TradeOff.RewardShape(steadyStateIntensity = 0.2, intensityGain = 8.0)
     shape.urgency(0.0) shouldBe 0.2 +- tolerance

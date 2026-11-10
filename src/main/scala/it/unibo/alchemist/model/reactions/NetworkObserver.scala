@@ -26,10 +26,14 @@ final class NetworkObserver[T, P <: Position[P]](network: NetworkView[T, P], con
     */
   def costScale: Double = networkSize.getOrElse(1.0)
 
-  /** What the privileged critics see of a decision of `id` ([[CriticContext]]), from the last observation. */
-  def contextOf(id: Int): CriticContext =
+  /** What the privileged critics see of a decision of `id` ([[CriticContext]]), from the last observation, when the
+    * last change of the network happened `sinceChange` seconds ago.
+    */
+  def contextOf(id: Int, sinceChange: Double): CriticContext =
     last
-      .flatMap(previous => NetworkObserver.contextOf(id, previous.observations, config.lossScale))
+      .flatMap(previous =>
+        NetworkObserver.contextOf(id, previous.observations, config.lossScale, eventAge(sinceChange))
+      )
       .getOrElse(CriticContext.Unknown)
 
   def observe(now: Double, episode: MobileEpisode, nodes: List[Node[T]]): Unit =
@@ -129,19 +133,29 @@ object NetworkObserver:
     def sees(now: Double, current: Long, population: Set[Int]): Boolean =
       time == now && version == current && outputs.keySet == population
 
-  /** The context of a decision of `id` ([[CriticContext]]) from the `observations` of every node, in units of `scale`:
-    * its own loss and the mean loss of the network count each error as at most `scale`, an unbounded charged cost as
-    * `scale`.
+  /** The context of a decision of `id` ([[CriticContext]]) from the `observations` of every node, in units of `scale`,
+    * with the `eventAge` of the last change: its own loss and the mean loss of the network count each error as at most
+    * `scale`, an unbounded charged cost as `scale`.
     */
-  def contextOf(id: Int, observations: Map[Int, NodeObservation], scale: Double): Option[CriticContext] =
+  def contextOf(
+      id: Int,
+      observations: Map[Int, NodeObservation],
+      scale: Double,
+      eventAge: Double
+  ): Option[CriticContext] =
     def loss(error: Double): Double = (if error < scale then error else scale) / scale
     observations.get(id).map { own =>
       CriticContext(
         loss(own.error),
         (if own.cost.isFinite then own.cost else scale) / scale,
-        observations.values.map(observation => loss(observation.error)).sum / observations.size
+        observations.values.map(observation => loss(observation.error)).sum / observations.size,
+        observations.values.count(!_.error.isFinite).toDouble / observations.size,
+        eventAge
       )
     }
+
+  /** The age of a change of the network `seconds` ago, in [0, 1]: one after [[CriticContext.EventAgeHorizon]]. */
+  def eventAge(seconds: Double): Double = math.min(1.0, seconds / CriticContext.EventAgeHorizon)
 
   /** Whether a node holds the same output: unlike `==`, a zero that changes sign is a change and NaN is NaN. */
   def sameOutput(previous: Option[Double], current: Option[Double]): Boolean = (previous, current) match

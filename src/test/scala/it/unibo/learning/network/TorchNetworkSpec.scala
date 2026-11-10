@@ -114,4 +114,11 @@ class TorchNetworkSpec extends AnyFlatSpec with Matchers:
       val target = manager.create(Array(0.0f, 0.0f))
       TorchNetwork.smoothL1Loss(predicted, target).getFloat() shouldBe ((0.125f + 2.5f) / 2) +- tolerance
     }
+
+  "The squared loss" should "be quadratic for every error" in
+    Using.resource(NDManager.newBaseManager()) { manager =>
+      val predicted = manager.create(Array(0.5f, 3.0f))
+      val target = manager.create(Array(0.0f, 0.0f))
+      TorchNetwork.squaredLoss(predicted, target).getFloat() shouldBe ((0.125f + 4.5f) / 2) +- tolerance
+    }
 end TorchNetworkSpec

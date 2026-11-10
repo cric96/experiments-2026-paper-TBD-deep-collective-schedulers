@@ -40,6 +40,7 @@ final class MobileExperiment[T, P <: Position[P]](
   private val network = NetworkView(environment, () => orderedNodes, () => config.blockAt(episode.index))
   private val observer = NetworkObserver(network, config)
   private var halfwayPassed: Boolean = false
+  private var extraSwitches: Seq[Double] = config.extraSwitchesAt(0)
   private var moving: Option[Set[Int]] = None
   private var complete: Boolean = false
   private var episodeRows: Vector[Seq[String]] = Vector.empty
@@ -84,7 +85,12 @@ final class MobileExperiment[T, P <: Position[P]](
   override def decision(state: AgentState, period: Double, time: Double): Unit =
     if !complete then
       observe(time)
-      episode.decision(state, period, time, observer.contextOf(state.me))
+      episode.decision(
+        state,
+        period,
+        time,
+        observer.contextOf(state.me, config.sinceLastChange(episode.index, time - episode.start))
+      )
 
   override protected def react(): Unit =
     val now = environment.getSimulation.getTime.toDouble
@@ -97,6 +103,7 @@ final class MobileExperiment[T, P <: Position[P]](
           halfwayEvent()
           halfwayPassed = true
         if halfwayPassed then followMotionWindow(now)
+        switchAgain(now)
         observe(now)
         if math.abs((now - episode.start) % FrameInterval) < ClockTolerance then recordFrame(now)
         if math.abs(now - math.rint(now)) < ClockTolerance then snapshots.observe(now)
@@ -120,6 +127,7 @@ final class MobileExperiment[T, P <: Position[P]](
       sources = new Well19937c(sourceSeed + next)
       if config.evaluationSeed.nonEmpty then resetIndependent(next)
       halfwayPassed = false
+      extraSwitches = config.extraSwitchesAt(next)
       moving = movingAtStart(next)
       chooseSource()
       observe(now)
@@ -200,6 +208,12 @@ final class MobileExperiment[T, P <: Position[P]](
       now + ClockTolerance >= episode.start + window.start
     then moving = None
   }
+
+  /** Moves the source to a far node at each extra switch of the episode that `now` has reached. */
+  private def switchAgain(now: Double): Unit =
+    val (due, later) = extraSwitches.partition(time => now + ClockTolerance >= episode.start + time)
+    due.foreach(_ => chooseSource())
+    extraSwitches = later
 
   /** The nodes nearest a centre drawn from the motion stream of the episode. */
   private def movingRegion(): Set[Int] =

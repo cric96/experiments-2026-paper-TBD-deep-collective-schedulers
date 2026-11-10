@@ -40,7 +40,8 @@ final private[agents] case class GraphBatch(
 )
 
 private[agents] object GraphBatch:
-  def apply(batch: Vector[GraphTransition], manager: NDManager, privileged: Boolean): GraphBatch =
+  /** The tensors of `batch`, with the first `contextSize` features of the contexts if the critics see them. */
+  def apply(batch: Vector[GraphTransition], manager: NDManager, contextSize: Int): GraphBatch =
     GraphBatch(
       states = rows(batch.map(_.conditionedState), manager),
       nextStates = rows(batch.map(_.conditionedNextState), manager),
@@ -50,6 +51,6 @@ private[agents] object GraphBatch:
         rows(batch.map(transition => Array(transition.convergenceWeight, transition.energyWeight)), manager),
       terminals = column(batch.map(_.terminal), manager),
       discounts = column(batch.map(_.discountFactor), manager),
-      contexts = Option.when(privileged)(rows(batch.map(_.context), manager)),
-      nextContexts = Option.when(privileged)(rows(batch.map(_.nextContext), manager))
+      contexts = Option.when(contextSize > 0)(rows(batch.map(_.context.take(contextSize)), manager)),
+      nextContexts = Option.when(contextSize > 0)(rows(batch.map(_.nextContext.take(contextSize)), manager))
     )

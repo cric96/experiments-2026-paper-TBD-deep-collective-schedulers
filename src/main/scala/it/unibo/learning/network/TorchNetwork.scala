@@ -156,6 +156,9 @@ object TorchNetwork:
       EdgeGATBlock(selfDim, maxNeighbors, neighDim, edgeHidden, readoutHidden, outputSize, outputActivation)
     TorchNetwork(name, selfDim + maxNeighbors * neighDim, block, lr, seed = seed)
 
+  /** Squared loss: 0.5 · x², averaged; it agrees with the smooth L1 loss on the errors below δ. */
+  def squaredLoss(predicted: NDArray, target: NDArray): NDArray = predicted.sub(target).pow(2).mul(0.5f).mean()
+
   /** Smooth L1 (Huber) loss: 0.5 · x² if |x| < δ, |x| − 0.5 otherwise, averaged. */
   def smoothL1Loss(predicted: NDArray, target: NDArray): NDArray =
     val error = predicted.sub(target).abs()

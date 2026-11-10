@@ -150,6 +150,76 @@ VARIANTS['network-error-full-range'] = NETWORK_ERROR
 VARIANTS.update({f'network-error-discount-{discount:g}': dict(NETWORK_ERROR, spatialDiscount=discount)
                  for discount in NETWORK_DISCOUNTS})
 NETWORK_VARIANTS = ('network-error-full-range', *(f'network-error-discount-{discount:g}' for discount in NETWORK_DISCOUNTS))
+# The contingencies of the global objective (2026-11-10, validation-network-error-contingency), after no discount passed
+# the first gate: the critic's best period barely depends on beta (about 3 s at every beta, the actor even lazier).
+# With rho 1: three times the gradient steps (the actor lags behind the critic), the error twice as expensive against a
+# round (cost reference time 0.1 s instead of 0.25 s), the squared loss on the convergence values (the Huber loss shrinks
+# the rare large costs). With rho 0.5, which ablate the novelties against the neighbourhood error: no privileged critic,
+# and the static training of the neighbourhood error instead of the composite episode.
+NETWORK_HALF_DISCOUNT = VARIANTS['network-error-discount-0.5']
+NETWORK_CONTINGENCIES = {
+    'network-error-long-training': dict(NETWORK_ERROR, stepsPerEpisode=3 * COMMON['stepsPerEpisode']),
+    'network-error-wide-price': dict(NETWORK_ERROR, costReferenceTime=.1),
+    'network-error-squared-loss': dict(NETWORK_ERROR, convergenceLoss='Squared'),
+    'network-error-discount-0.5-unprivileged': dict(NETWORK_HALF_DISCOUNT, privilegedCritic=0),
+    'network-error-discount-0.5-static-training': dict(NETWORK_HALF_DISCOUNT, trainingEvents='SourceSwitch',
+                                                       trainingSpeeds='0', motionDelay=0., trainingMotionDuration=-1.),
+}
+VARIANTS.update(NETWORK_CONTINGENCIES)
+NETWORK_VARIANTS = (*NETWORK_VARIANTS, *NETWORK_CONTINGENCIES)
+# Contingency C3, chosen by the user (2026-11-10) over dropping the privileged critic, with rho 0.5: a richer context of
+# the critics (the share of the nodes the field has not reached and the age of the last change of the network), more
+# data (20 training episodes instead of 10, the same 10 evaluation ones), and both.
+MORE_DATA = dict(trainingEpisodes=2 * COMMON['trainingEpisodes'], episodes=COMMON['episodes'] + COMMON['trainingEpisodes'])
+NETWORK_RICHER = {
+    'network-error-discount-0.5-rich-context': dict(NETWORK_HALF_DISCOUNT, richContext=1),
+    'network-error-discount-0.5-more-data': dict(NETWORK_HALF_DISCOUNT, **MORE_DATA),
+    'network-error-discount-0.5-rich-context-more-data': dict(NETWORK_HALF_DISCOUNT, richContext=1, **MORE_DATA),
+}
+VARIANTS.update(NETWORK_RICHER)
+NETWORK_VARIANTS = (*NETWORK_VARIANTS, *NETWORK_RICHER)
+# Contingency C4 (2026-11-10), after C3: the recovery after a switch is 1.1-1.8 times the envelope's and resting nodes
+# sleep 4-5 s at every beta. A longer horizon (gamma 0.95 per second for the learners and for the cost within a sleep,
+# about 20 s instead of 10 s) and a second source switch in every training episode (at 50 s, before the one at 100 s),
+# with rho 0.5 and the privileged critic, and without it for comparison.
+LONG_HORIZON = dict(gamma=.95, costDiscount=.95, extraSwitches='50.0')
+NETWORK_RECOVERY = {
+    'network-error-discount-0.5-gamma-0.95-two-switches': dict(NETWORK_HALF_DISCOUNT, **LONG_HORIZON),
+    'network-error-discount-0.5-unprivileged-gamma-0.95-two-switches': dict(NETWORK_HALF_DISCOUNT, privilegedCritic=0,
+                                                                            **LONG_HORIZON),
+}
+VARIANTS.update(NETWORK_RECOVERY)
+NETWORK_VARIANTS = (*NETWORK_VARIANTS, *NETWORK_RECOVERY)
+# Fallback C8, chosen by the user (2026-11-10) after C1-C4: the plain critic of C4 keeps a gain of 1.2-1.7 over the
+# envelope, but at about 0.3 rounds/s whatever beta. Its convergence cost becomes hybrid: the network error plus a weight
+# times the convergence surrogate of the full-range reward shape, (1 + 8 I) u^2 with a missing value as I = 1
+# (HybridConvergence), which tuned the rounds with beta (legacy-full-range, 0.26-0.91 rounds/s). For a resting node and
+# an effective size of about 10, the weights 0.1, 0.3 and 1 move its best period over beta 0.2-0.95 from 5 to about
+# 1.15, 0.8 and 0.6 s.
+SURROGATE_WEIGHTS = (.1, .3, 1.)
+HYBRID_BASE = dict(NETWORK_RECOVERY['network-error-discount-0.5-unprivileged-gamma-0.95-two-switches'],
+                   **FULL_RANGE_SHAPE, missingValueIntensity=1.0)
+NETWORK_HYBRID = {f'network-error-hybrid-{weight:g}': dict(HYBRID_BASE, surrogateWeight=weight)
+                  for weight in SURROGATE_WEIGHTS}
+VARIANTS.update(NETWORK_HYBRID)
+NETWORK_VARIANTS = (*NETWORK_VARIANTS, *NETWORK_HYBRID)
+# The hybrid pilot (2026-11-10): weight 1 gives a beta dial (0.4 to 1-1.4 rounds/s with a gain) but 7 of 20 runs of a
+# seed and a beta collapse to the fastest period, weight 0.3 is stable without a dial. Against the collapses, chosen by
+# the user: weights 0.5 and 1 with 20 training episodes (more data steadied C3).
+# Then (validation-network-error-stable-hybrid) no weight collapses with 20 episodes, but the rounds span only 0.35-0.45
+# (weight 0.5) and 0.4-0.8 per second (weight 1): weights 2 and 4 widen the dial, as the user chose.
+STABLE_HYBRID_WEIGHTS = (.5, 1., 2., 4.)
+NETWORK_STABLE_HYBRID = {f'network-error-hybrid-{weight:g}-more-data': dict(HYBRID_BASE, surrogateWeight=weight, **MORE_DATA)
+                         for weight in STABLE_HYBRID_WEIGHTS}
+VARIANTS.update(NETWORK_STABLE_HYBRID)
+NETWORK_VARIANTS = (*NETWORK_VARIANTS, *NETWORK_STABLE_HYBRID)
+# The weight sets a band of rounds and beta moves only about 1.5 times within it (validation-network-error-wide-hybrid;
+# weight 4 collapses 12 runs of 20): beta chooses the weight too, as the user chose, geometrically from 0.2 at the
+# lowest beta of the grid to 2 at the highest one (SurrogateWeights), with 20 training episodes.
+NETWORK_SCHEDULED_HYBRID = {'network-error-hybrid-scheduled': dict(HYBRID_BASE, surrogateWeight=.2,
+                                                                   highSurrogateWeight=2., **MORE_DATA)}
+VARIANTS.update(NETWORK_SCHEDULED_HYBRID)
+NETWORK_VARIANTS = (*NETWORK_VARIANTS, *NETWORK_SCHEDULED_HYBRID)
 # Trickle and the gradual controller tuned by beta: after a change they fall back to the best period of an urgent node
 # on the linear scale instead of 0.5 s. Shared controls like the fixed periods, on the grid of the learned variants.
 TUNED_BASELINES = 'tuned-baselines'

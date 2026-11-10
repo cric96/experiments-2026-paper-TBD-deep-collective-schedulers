@@ -16,8 +16,11 @@ import it.unibo.learning.network.NDArrayOps.*
 /** Offline TD3 on the node's star graph: an edge-conditioned graph-attention actor (EdgeGAT) and twin multi-objective
   * critics that predict [Q_convergence, Q_energy], scalarized with the objective weights of each transition's trade-off
   * β, with delayed policy updates and target policy smoothing ([[TwinDelayed]]). A `privilegedCritic` also sees what
-  * the mobile experiment measured of each decision on the ground truth ([[CriticContext]]); the actor never does. A
-  * `diagnosed` learner diagnoses its networks after every training session ([[TrainingDiagnostics]]).
+  * the mobile experiment measured of each decision on the ground truth ([[CriticContext]], all of it with
+  * `richContext`); the actor never does. A `diagnosed` learner diagnoses its networks after every training session
+  * ([[TrainingDiagnostics]]); the critics fit the convergence values with the `convergenceLoss`. A measured convergence
+  * cost is made hybrid by the `surrogateWeight` ([[HybridConvergence]]), growing up to the `highSurrogateWeight` at the
+  * highest β of the scale, if given ([[SurrogateWeights]]).
   */
 final class OfflineLearnerGNN(
     min: Double,
@@ -40,7 +43,11 @@ final class OfflineLearnerGNN(
     rewardShape: TradeOff.RewardShape = TradeOff.RewardShape(),
     missingValueFeature: Boolean = false,
     privilegedCritic: Boolean = false,
-    diagnosed: Boolean = false
+    diagnosed: Boolean = false,
+    convergenceLoss: ConvergenceLoss = ConvergenceLoss.Huber,
+    richContext: Boolean = false,
+    surrogateWeight: Double = 0.0,
+    highSurrogateWeight: Option[Double] = None
 ) extends EpisodicOfflineLearner[GraphTransition](
       randomKey,
       weight,
@@ -55,8 +62,17 @@ final class OfflineLearnerGNN(
   private val neighDim: Int =
     if mobile && mobileEncoding then MobileEncoding.neighDim(mobileFeatures) else StarGraph.NeighDim
   require(!privilegedCritic || mobile, "Only the mobile experiment measures the context of a privileged critic")
-  private val contextDim: Int = if privilegedCritic then CriticContext.Size else 0
+  require(!richContext || privilegedCritic, "Only a privileged critic sees a rich context")
+  private val contextDim: Int =
+    if !privilegedCritic then 0 else if richContext then CriticContext.RichSize else CriticContext.Size
   private val actionScaler: MinMaxActionScaler = MinMaxActionScaler(min, max)
+  private val hybrid: HybridConvergence =
+    HybridConvergence(
+      SurrogateWeights.of(surrogateWeight, highSurrogateWeight, rewardShape.scale),
+      rewardShape,
+      min,
+      max
+    )
   private val networkSeed: Int = LearnerSeeds.networks(randomKey, weight)
   private val actor: TorchNetwork[EdgeGATBlock] = actorNetwork("gat-actor", seedOffset = 101)
   private val targetActor: TorchNetwork[EdgeGATBlock] = actorNetwork("gat-target-actor", seedOffset = 102)
@@ -144,7 +160,8 @@ final class OfflineLearnerGNN(
     GraphTransition(
       state = relabelled.state,
       scaledAction = actionScaler.scale(period),
-      convergenceReward = relabelled.errorIntegral.fold(-(u * u))(-_).toFloat,
+      convergenceReward =
+        relabelled.errorIntegral.fold(-(u * u))(cost => -hybrid.cost(relabelled.step, cost, relabelled.beta)).toFloat,
       energyReward = (if mobile then -relabelled.energyCost else -((1.0 - u) * (1.0 - u))).toFloat,
       convergenceWeight = (if mobile then relabelled.beta else weights.convergence).toFloat,
       energyWeight = (if mobile then (1.0 - relabelled.beta) / relabelled.costScale else weights.energy).toFloat,
@@ -157,11 +174,11 @@ final class OfflineLearnerGNN(
     )
 
   override protected def trainOn(batch: Vector[GraphTransition], manager: NDManager): Unit =
-    val tensors = GraphBatch(batch, manager, privilegedCritic)
+    val tensors = GraphBatch(batch, manager, contextDim)
     val targets = clippedDoubleQTargets(tensors)
     val stateActions = withAction(tensors.states, tensors.actions, tensors.contexts)
     Seq(critic1, critic2).foreach { critic =>
-      critic.trainStep(TorchNetwork.smoothL1Loss(critic.forward(stateActions, training = true), targets))
+      critic.trainStep(convergenceLoss.multiObjective(critic.forward(stateActions, training = true), targets))
     }
     policyUpdates.afterCriticUpdate(updatePolicy(tensors))
 
@@ -188,8 +205,8 @@ final class OfflineLearnerGNN(
     val values = critic1.forward(withAction(tensors.states, actions, tensors.contexts), training = true)
     -(values * tensors.objectiveWeights).sum(Array(1)).mean()
 
-  /** Inserts the (B × 1) actions, and the (B × [[CriticContext.Size]]) contexts of a privileged critic, right after the
-    * ego features of the (B × TotalDim) star-graph states.
+  /** Inserts the (B × 1) actions, and the contexts of a privileged critic, right after the ego features of the (B ×
+    * TotalDim) star-graph states.
     */
   private def withAction(states: NDArray, actions: NDArray, contexts: Option[NDArray]): NDArray =
     val ego = states.get(new NDIndex(":, :{}", java.lang.Long.valueOf(selfDim.toLong)))
@@ -217,14 +234,14 @@ final class OfflineLearnerGNN(
       transition.deferredBeta.flatMap(beta => betaOfFeature.get(beta.value))
 
     override def probe(batch: Vector[GraphTransition], manager: NDManager): ProbedBatch =
-      val tensors = GraphBatch(batch, manager, privilegedCritic)
+      val tensors = GraphBatch(batch, manager, contextDim)
       def values(actions: NDArray): NDArray = critic1.evaluate(withAction(tensors.states, actions, tensors.contexts))
       def scalarized(period: Double): Seq[Double] =
         val actions = manager.full(new Shape(batch.size.toLong, 1), actionScaler.scale(period))
         (values(actions) * tensors.objectiveWeights).sum(Array(1)).toFloatArray.toSeq.map(_.toDouble)
       val targets = doubleQTargets(tensors, targetActor.evaluate(tensors.nextStates))
       ProbedBatch(
-        TorchNetwork.smoothL1Loss(values(tensors.actions), targets).getFloat().toDouble,
+        convergenceLoss.multiObjective(values(tensors.actions), targets).getFloat().toDouble,
         actor.evaluate(tensors.states).toFloatArray.toSeq.map(action => actionScaler.unscale(action.toDouble)),
         grid.map(scalarized)
       )

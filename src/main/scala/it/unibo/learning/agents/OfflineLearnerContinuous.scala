@@ -17,8 +17,11 @@ import java.io.File
 /** Offline TD3 over the spatial-temporal state, conditioned on the trade-off weight β: twin critics with clipped
   * double-Q targets, delayed policy updates and target policy smoothing ([[TwinDelayed]]); the actor outputs a
   * continuous wake-up period in [`min`, `max`]. A `privilegedCritic` also sees what the mobile experiment measured of
-  * each decision on the ground truth ([[CriticContext]]); the actor never does. A `diagnosed` learner diagnoses its
-  * networks after every training session ([[TrainingDiagnostics]]).
+  * each decision on the ground truth ([[CriticContext]], all of it with `richContext`); the actor never does. A
+  * `diagnosed` learner diagnoses its networks after every training session ([[TrainingDiagnostics]]); the critics fit
+  * their values with the `convergenceLoss`. A measured convergence cost is made hybrid by the `surrogateWeight`
+  * ([[HybridConvergence]]), growing up to the `highSurrogateWeight` at the highest β of the scale, if given
+  * ([[SurrogateWeights]]).
   */
 final class OfflineLearnerContinuous(
     min: Double,
@@ -43,7 +46,11 @@ final class OfflineLearnerContinuous(
     rewardShape: TradeOff.RewardShape = TradeOff.RewardShape(),
     missingValueFeature: Boolean = false,
     privilegedCritic: Boolean = false,
-    diagnosed: Boolean = false
+    diagnosed: Boolean = false,
+    convergenceLoss: ConvergenceLoss = ConvergenceLoss.Huber,
+    richContext: Boolean = false,
+    surrogateWeight: Double = 0.0,
+    highSurrogateWeight: Option[Double] = None
 ) extends EpisodicOfflineLearner[ContinuousTransition](
       randomKey,
       weight,
@@ -56,8 +63,17 @@ final class OfflineLearnerContinuous(
     else if missingValueFeature then stateDim + 1
     else stateDim
   require(!privilegedCritic || mobile, "Only the mobile experiment measures the context of a privileged critic")
-  private val contextDim: Int = if privilegedCritic then CriticContext.Size else 0
+  require(!richContext || privilegedCritic, "Only a privileged critic sees a rich context")
+  private val contextDim: Int =
+    if !privilegedCritic then 0 else if richContext then CriticContext.RichSize else CriticContext.Size
   private val actionScaler: MinMaxActionScaler = MinMaxActionScaler(min, max)
+  private val hybrid: HybridConvergence =
+    HybridConvergence(
+      SurrogateWeights.of(surrogateWeight, highSurrogateWeight, rewardShape.scale),
+      rewardShape,
+      min,
+      max
+    )
   private val networkSeed: Int = LearnerSeeds.networks(randomKey, weight)
   private val actor: TorchNetwork[SequentialBlock] = actorNetwork("actor", seedOffset = 1)
   private val targetActor: TorchNetwork[SequentialBlock] = actorNetwork("target-actor", seedOffset = 2)
@@ -135,7 +151,13 @@ final class OfflineLearnerContinuous(
       scaledAction = actionScaler.scale(period),
       reward = relabelled.errorIntegral
         .fold(TradeOff.offlineReward(rewardIntensity(relabelled), period, relabelled.beta, min, max, rewardShape))(
-          cost => MobileObjective.reward(cost, relabelled.energyCost / relabelled.costScale, relabelled.beta)
+          cost =>
+            MobileObjective
+              .reward(
+                hybrid.cost(relabelled.step, cost, relabelled.beta),
+                relabelled.energyCost / relabelled.costScale,
+                relabelled.beta
+              )
         )
         .toFloat,
       nextState = relabelled.nextState,
@@ -147,11 +169,11 @@ final class OfflineLearnerContinuous(
     )
 
   override protected def trainOn(batch: Vector[ContinuousTransition], manager: NDManager): Unit =
-    val tensors = ContinuousBatch(batch, manager, privilegedCritic)
+    val tensors = ContinuousBatch(batch, manager, contextDim)
     val targets = clippedDoubleQTargets(tensors)
     val stateActions = withAction(tensors.states, tensors.actions, tensors.contexts)
     Seq(critic1, critic2).foreach { critic =>
-      critic.trainStep(TorchNetwork.smoothL1Loss(critic.forward(stateActions, training = true), targets))
+      critic.trainStep(convergenceLoss.scalar(critic.forward(stateActions, training = true), targets))
     }
     policyUpdates.afterCriticUpdate(updatePolicy(tensors))
 
@@ -207,14 +229,14 @@ final class OfflineLearnerContinuous(
       transition.deferredBeta.flatMap(beta => betaOfFeature.get(beta.value))
 
     override def probe(batch: Vector[ContinuousTransition], manager: NDManager): ProbedBatch =
-      val tensors = ContinuousBatch(batch, manager, privilegedCritic)
+      val tensors = ContinuousBatch(batch, manager, contextDim)
       def values(actions: NDArray): NDArray = critic1.evaluate(withAction(tensors.states, actions, tensors.contexts))
       def at(period: Double): Seq[Double] =
         values(manager.full(new Shape(batch.size.toLong, 1), actionScaler.scale(period))).toFloatArray.toSeq
           .map(_.toDouble)
       val targets = doubleQTargets(tensors, targetActor.evaluate(tensors.nextStates))
       ProbedBatch(
-        TorchNetwork.smoothL1Loss(values(tensors.actions), targets).getFloat().toDouble,
+        convergenceLoss.scalar(values(tensors.actions), targets).getFloat().toDouble,
         actor.evaluate(tensors.states).toFloatArray.toSeq.map(action => actionScaler.unscale(action.toDouble)),
         grid.map(at)
       )

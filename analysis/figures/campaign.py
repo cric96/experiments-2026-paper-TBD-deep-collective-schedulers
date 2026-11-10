@@ -61,6 +61,26 @@ VARIANT_LABELS = {
     "network-error-full-range": "Full-range β, network error",
     "network-error-discount-0.5": "Full-range β, network error (ρ 0.5)",
     "network-error-discount-0.75": "Full-range β, network error (ρ 0.75)",
+    "network-error-long-training": "Full-range β, network error, 3× training",
+    "network-error-wide-price": "Full-range β, network error, cost reference 0.1 s",
+    "network-error-squared-loss": "Full-range β, network error, squared loss",
+    "network-error-discount-0.5-unprivileged": "Full-range β, network error (ρ 0.5), plain critic",
+    "network-error-discount-0.5-static-training": "Full-range β, network error (ρ 0.5), static training",
+    "network-error-discount-0.5-rich-context": "Full-range β, network error (ρ 0.5), rich context",
+    "network-error-discount-0.5-more-data": "Full-range β, network error (ρ 0.5), 20 training episodes",
+    "network-error-discount-0.5-rich-context-more-data":
+        "Full-range β, network error (ρ 0.5), rich context, 20 training episodes",
+    "network-error-discount-0.5-gamma-0.95-two-switches": "Full-range β, network error (ρ 0.5), γ 0.95, two switches",
+    "network-error-discount-0.5-unprivileged-gamma-0.95-two-switches":
+        "Full-range β, network error (ρ 0.5), plain critic, γ 0.95, two switches",
+    "network-error-hybrid-0.1": "Full-range β, hybrid network error, surrogate weight 0.1",
+    "network-error-hybrid-0.3": "Full-range β, hybrid network error, surrogate weight 0.3",
+    "network-error-hybrid-1": "Full-range β, hybrid network error, surrogate weight 1",
+    "network-error-hybrid-0.5-more-data": "Full-range β, hybrid network error, surrogate weight 0.5, 20 training episodes",
+    "network-error-hybrid-1-more-data": "Full-range β, hybrid network error, surrogate weight 1, 20 training episodes",
+    "network-error-hybrid-2-more-data": "Full-range β, hybrid network error, surrogate weight 2, 20 training episodes",
+    "network-error-hybrid-4-more-data": "Full-range β, hybrid network error, surrogate weight 4, 20 training episodes",
+    "network-error-hybrid-scheduled": "Full-range β, hybrid network error, surrogate weight 0.2-2 with β",
 }
 PROGRAMS = {0: "Gradient", 1: "Hop count", 2: "Broadcast", 3: "Collect", 4: "Election"}
 PHASES = {"bootstrap": "Start-up\n0–40 s", "quiet": "Stable\n40–100 s", "event": "Event\n100–150 s",

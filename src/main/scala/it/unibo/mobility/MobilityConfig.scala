@@ -12,7 +12,7 @@ import java.io.File
   * `motionDelay` seconds after halfway; the training episodes move for `trainingMotionDuration` seconds when given (the
   * evaluation ones for `motionDuration`). The network cost ([[CostSignal.Network]]) weighs the errors `spatialDiscount`
   * less at every hop, and a decision pays it discounted by `costDiscount` per second of its sleep, the γ of the
-  * learners.
+  * learners. The training episodes switch the source also at the `extraSwitches` (seconds from their start).
   */
 final case class MobilityConfig(
     seed: Int,
@@ -48,7 +48,8 @@ final case class MobilityConfig(
     spatialDiscount: Double = 1.0,
     costDiscount: Double = MobilityConfig.CostDiscount,
     motionDelay: Double = 0.0,
-    trainingMotionDuration: Option[Double] = None
+    trainingMotionDuration: Option[Double] = None,
+    extraSwitches: Seq[Double] = Seq.empty
 ):
   require(diffusion >= 0.0 && diffusion.isFinite && tolerance >= 0.0 && tolerance.isFinite)
   require(beta >= 0.0 && beta <= 1.0 && MobilityConfig.Algorithms.contains(algorithm))
@@ -79,6 +80,10 @@ final case class MobilityConfig(
   require(trainingSpeeds.nonEmpty && trainingSpeeds.forall(value => value >= 0.0 && value.isFinite))
   require(trainingEvents.nonEmpty && movingShare > 0.0 && movingShare <= 1.0 && motionDuration > 0.0)
   require(motionDelay >= 0.0 && motionDelay.isFinite && trainingMotionDuration.forall(_ > 0.0))
+  require(
+    extraSwitches.forall(time => time > 0.0 && time < episodeLength && MobilityConfig.onTick(time, movementInterval)),
+    "The extra source switches must fall within the episode, on a movement tick"
+  )
 
   require(evaluationNodes > 1)
   require(evaluationSeed.isEmpty || trainingEpisodes > 0, "Independent protocol requires a training episode")
@@ -124,6 +129,22 @@ final case class MobilityConfig(
         Some(MotionWindow(halfway + motionDelay, halfway + motionDelay + motionDurationAt(episode)))
       case EpisodeEvent.SourceSwitch | EpisodeEvent.SourceSwitchWhileRegionMoves => None
 
+  /** The instants (seconds from the start) of the extra source switches of `episode`: none in the evaluation ones. */
+  def extraSwitchesAt(episode: Int): Seq[Double] = if isTraining(episode) then extraSwitches else Seq.empty
+
+  /** When the network of `episode` changes, in seconds from its start: the start, halfway (a source switch or a region
+    * that starts moving), the extra source switches and the ends of its motion window.
+    */
+  def changesAt(episode: Int): Seq[Double] =
+    val halfway = episodeLength / 2.0
+    val event = Option.when(sourceChanges || eventAt(episode) == EpisodeEvent.RegionStartsMoving)(halfway)
+    val motion = motionWindowAt(episode).toSeq.flatMap(window => Seq(window.start, window.end))
+    (0.0 +: (event.toSeq ++ extraSwitchesAt(episode) ++ motion)).filter(_.isFinite).distinct.sorted
+
+  /** The seconds from the last change of the network of `episode` to `elapsed` seconds from its start. */
+  def sinceLastChange(episode: Int, elapsed: Double): Double =
+    elapsed - changesAt(episode).filter(_ <= elapsed).maxOption.getOrElse(0.0)
+
   def toleranceAt(episode: Int): Double =
     if isTraining(episode) then trainingTolerances(episode % trainingTolerances.size) else tolerance
   def tolerances: Seq[Double] = (trainingTolerances :+ tolerance).distinct
@@ -147,6 +168,13 @@ end MobilityConfig
 object MobilityConfig:
   /** Discount per second of the costs paid within a sleep: the γ of the offline learners. */
   val CostDiscount: Double = 0.9
+
+  /** How far from a whole number of movement intervals an instant still falls on a movement tick. */
+  val TickTolerance: Double = 1e-8
+
+  /** Whether `time` is a whole number of movement `interval`s. */
+  def onTick(time: Double, interval: Double): Boolean =
+    math.abs(time / interval - math.rint(time / interval)) < TickTolerance
 
   val TransferMLP: Int = 8
   val TransferGNN: Int = 9

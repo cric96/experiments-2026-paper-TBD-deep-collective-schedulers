@@ -1,6 +1,6 @@
 package it.unibo.alchemist.model.reactions
 
-import it.unibo.alchemist.model.reactions.NetworkObserver.{contextOf, sameOutput, Observation}
+import it.unibo.alchemist.model.reactions.NetworkObserver.{contextOf, eventAge, sameOutput, Observation}
 import it.unibo.learning.abstractions.CriticContext
 import it.unibo.mobility.NodeObservation
 import org.scalatest.flatspec.AnyFlatSpec
@@ -38,8 +38,18 @@ class NetworkObserverSpec extends AnyFlatSpec with Matchers:
       4 -> NodeObservation(200.0, reachable = true, cost = 200.0)
     )
     val networkLoss = (0.25 + 1.0 + 0.0 + 0.5) / 4
-    contextOf(1, observations, scale) shouldBe Some(CriticContext(0.25, 1.5, networkLoss))
-    contextOf(2, observations, scale) shouldBe Some(CriticContext(1.0, 1.0, networkLoss))
-    contextOf(5, observations, scale) shouldBe None
+    val unreached = 1.0 / 4
+    val eventAge = 0.5
+    contextOf(1, observations, scale, eventAge) shouldBe
+      Some(CriticContext(0.25, 1.5, networkLoss, unreached, eventAge))
+    contextOf(2, observations, scale, eventAge) shouldBe
+      Some(CriticContext(1.0, 1.0, networkLoss, unreached, eventAge))
+    contextOf(5, observations, scale, eventAge) shouldBe None
+  }
+
+  "The age of the last event" should "grow with the seconds since it, up to one after the horizon" in {
+    eventAge(0.0) shouldBe 0.0
+    eventAge(CriticContext.EventAgeHorizon / 2) shouldBe 0.5
+    eventAge(3 * CriticContext.EventAgeHorizon) shouldBe 1.0
   }
 end NetworkObserverSpec

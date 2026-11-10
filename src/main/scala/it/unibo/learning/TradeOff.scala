@@ -130,6 +130,14 @@ object TradeOff:
   def bestPeriod(intensity: Double, beta: Double, shape: RewardShape, min: Double, max: Double): Double =
     min + objectiveWeights(intensity, beta, shape).energy * (max - min)
 
+  /** The convergence cost of the counterfactual reward before β weighs it: the pressure S + G·I of a node of
+    * instability `intensity`, times u². The hybrid objective of the learners trained on a measured cost adds it to the
+    * cost.
+    */
+  def convergenceSurrogate(intensity: Double, period: Double, min: Double, max: Double, shape: RewardShape): Double =
+    val u = normalizedPeriod(period, min, max)
+    (shape.steadyStateIntensity + shape.intensityGain * intensity) * (u * u)
+
   /** Counterfactual reward used to train the offline learners for any β, from logged (intensity, period) pairs. */
   def offlineReward(
       intensity: Double,

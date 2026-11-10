@@ -65,4 +65,28 @@ class SimulationFilesSpec extends AnyFlatSpec with Matchers:
     val file = new File("src/main/yaml/simulationMobility.yml")
     mobilityAlgorithms.foreach(algorithm => load(file, Map("algoId" -> algorithm)) should be > 0)
   }
+
+  /** The global objective: the network cost, privileged and diagnosed critics, the composite training episode. */
+  private val networkError: Map[String, Any] = Map(
+    "costSignal" -> "Network",
+    "trainingTolerances" -> "0.0",
+    "spatialDiscount" -> 0.5,
+    "costDiscount" -> 0.9,
+    "privilegedCritic" -> 1,
+    "richContext" -> 1,
+    "gamma" -> 0.95,
+    "surrogateWeight" -> 0.3,
+    "highSurrogateWeight" -> 2.0,
+    "extraSwitches" -> "50.0",
+    "trainingDiagnostics" -> 1,
+    "convergenceLoss" -> "Squared",
+    "trainingEvents" -> "SourceSwitchThenMotion",
+    "motionDelay" -> 50.0,
+    "trainingMotionDuration" -> 30.0
+  )
+
+  it should "instantiate the learners of the global objective" in {
+    val file = new File("src/main/yaml/simulationMobility.yml")
+    Seq(0, 1).foreach(algorithm => load(file, networkError + ("algoId" -> algorithm)) should be > 0)
+  }
 end SimulationFilesSpec
