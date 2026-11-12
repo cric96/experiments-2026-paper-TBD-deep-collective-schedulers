@@ -26,7 +26,7 @@ from matplotlib.ticker import NullLocator
 
 from experiments.campaign import (BASELINES, DYNAMIC, FIXED, LEARNED, PROGRAMS, STATIC, TRAIN_SEEDS, focus_of,
                                   grid_of)
-from . import methods, style
+from . import config, methods, style
 from .campaign import EPISODE_LENGTH
 from .campaign_snapshots import EMBEDDINGS, INSPECTED_EVALUATION_SEED, SNAPSHOT_BETA
 from .figures import gnn, gnn_programs
@@ -124,22 +124,32 @@ def censored_recovery(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.assign(recoverySeconds=frame.recoverySeconds.mask(censored, EPISODE_LENGTH - EVENT_S))
 
 
+def episode_shift(job: dict) -> int:
+    """How many training episodes a run has beyond the paper's (config.TRAINING_EPISODES): its episodes are drawn that
+    many places earlier, so that the evaluation of every run starts at the same episode."""
+    return job["settings"]["trainingEpisodes"] - config.TRAINING_EPISODES
+
+
 def episode_table(home: Path, jobs: list[dict]) -> pd.DataFrame:
-    """One row per (run, episode), episodes counted from 1, the censored recovery times bounded."""
+    """One row per (run, episode), episodes counted from 1 and aligned on the start of the evaluation (a run that
+    trains longer than the paper's protocol shows only its last training episodes, [[episode_shift]]), the censored
+    recovery times bounded."""
     rows = []
     for job in jobs:
         frame = censored_recovery(pd.read_csv(next((home / "exports" / job["key"]).glob("*_episodes.csv"))))
         description = {key: value for key, value in job.items() if key != "settings"}
-        rows.append(frame[["episode", *EPISODE_COLUMNS]].assign(**description))
+        rows.append(frame[["episode", *EPISODE_COLUMNS]].assign(**description)
+                    .assign(episode=frame.episode - episode_shift(job)))
     table = pd.concat(rows, ignore_index=True)
     return table.assign(episode=table.episode + 1, rounds=table.roundsPerNodeSecond * ROUNDS_PER_RATE)
 
 
 def motion_episodes(job: dict) -> list[int]:
-    """The training episodes (from 1) where a region moves, from the cyclic schedule of training events."""
+    """The training episodes (from 1, aligned as in [[episode_table]]) where a region moves, from the cyclic schedule
+    of training events."""
     events = job["settings"]["trainingEvents"].split(",")
-    return [episode + 1 for episode in range(job["settings"]["trainingEpisodes"])
-            if events[episode % len(events)] == "RegionStartsMoving"]
+    return [episode + 1 - episode_shift(job) for episode in range(job["settings"]["trainingEpisodes"])
+            if events[episode % len(events)] == "RegionStartsMoving" and episode + 1 > episode_shift(job)]
 
 
 def learned(table: pd.DataFrame, algorithm: int, beta: float) -> pd.DataFrame:
@@ -507,8 +517,9 @@ def draw(home: Path, out: Path, finals: dict[int, str], controls: tuple[str, ...
     baselines = reactive_variant([job["variant"] for job in manifest], finals)
     jobs = [job for job in manifest if relevant(job, finals, baselines)]
     static = of_scenario(jobs, STATIC)
-    training = static[0]["settings"]["trainingEpisodes"]
-    motion = motion_episodes(static[0])
+    # The episodes of every run are aligned on the start of the evaluation (episode_table).
+    training = config.TRAINING_EPISODES
+    motion = motion_episodes(next((job for job in static if job["variant"] == finals[LEARNED[0]]), static[0]))
     table = episode_table(home, static)
     learning_curves_reward(table, finals, motion, training, out / "learning", baselines)
     learning_curves_metrics(table, finals, motion, out / "learning", baselines)
