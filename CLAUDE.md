@@ -36,6 +36,7 @@ with tabular, offline-deep and graph-based reinforcement learning.
 | `it.unibo.learning.agents.offline` | What the offline learners share: `EpisodicOfflineLearner` (end-of-episode training loop), `TrainingSchedule`, `Relabelling` (hindsight relabelling for every β), `StratifiedTransitions`, `LearnerSeeds`, `TargetNetworks`, `TwinDelayed` (the TD3 policy delay and target smoothing), `BatchTensors`, and the post-training `ActorInspection` (`Regime`, `PolicySurface`). |
 | `it.unibo.learning.network` | DJL/PyTorch: `TorchNetwork`, `EdgeGATBlock`, `FastInference` (lock-free forward passes used by the nodes every round), `MinMaxActionScaler`, `NDArrayOps`. |
 | `it.unibo.inspection` | Testable recorders of the snapshot CSV files (`NodeView`, `AttentionSummary`, ...). |
+| `it.unibo.alchemist.model.actions` | `SendPreviousExport`: the message timing of Alchemist 25 (at wake-up a node sends the export of its previous round, then computes). Every YAML uses it before `RunScafiProgram` instead of `- program: send`, whose Alchemist 45 timing (send as soon as the round completes) changes the results. |
 | `it.unibo.alchemist` | `Molecules` (typed molecule access), `KotlinInterop`, and the custom extractors used by the YAML `export` sections (`boundary.extractors`). The Alchemist glue must stay under `it.unibo.alchemist`: the loader resolves the unqualified `type:` names of the YAML files only there. |
 
 **The YAML files are a public API.** They instantiate learners and value objects through embedded Scala snippets
