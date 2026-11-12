@@ -21,7 +21,7 @@ import java.io.File
   * `diagnosed` learner diagnoses its networks after every training session ([[TrainingDiagnostics]]); the critics fit
   * their values with the `convergenceLoss`. A measured convergence cost is made hybrid by the `surrogateWeight`
   * ([[HybridConvergence]]), growing up to the `highSurrogateWeight` at the highest β of the scale, if given
-  * ([[SurrogateWeights]]).
+  * ([[SurrogateWeights]]); the `surrogateMotionAttenuation` discounts the instability of a moving neighbourhood.
   */
 final class OfflineLearnerContinuous(
     min: Double,
@@ -50,7 +50,8 @@ final class OfflineLearnerContinuous(
     convergenceLoss: ConvergenceLoss = ConvergenceLoss.Huber,
     richContext: Boolean = false,
     surrogateWeight: Double = 0.0,
-    highSurrogateWeight: Option[Double] = None
+    highSurrogateWeight: Option[Double] = None,
+    surrogateMotionAttenuation: Double = 0.0
 ) extends EpisodicOfflineLearner[ContinuousTransition](
       randomKey,
       weight,
@@ -72,7 +73,8 @@ final class OfflineLearnerContinuous(
       SurrogateWeights.of(surrogateWeight, highSurrogateWeight, rewardShape.scale),
       rewardShape,
       min,
-      max
+      max,
+      surrogateMotionAttenuation
     )
   private val networkSeed: Int = LearnerSeeds.networks(randomKey, weight)
   private val actor: TorchNetwork[SequentialBlock] = actorNetwork("actor", seedOffset = 1)

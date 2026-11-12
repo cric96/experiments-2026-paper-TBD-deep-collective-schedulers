@@ -20,7 +20,8 @@ import it.unibo.learning.network.NDArrayOps.*
   * `richContext`); the actor never does. A `diagnosed` learner diagnoses its networks after every training session
   * ([[TrainingDiagnostics]]); the critics fit the convergence values with the `convergenceLoss`. A measured convergence
   * cost is made hybrid by the `surrogateWeight` ([[HybridConvergence]]), growing up to the `highSurrogateWeight` at the
-  * highest β of the scale, if given ([[SurrogateWeights]]).
+  * highest β of the scale, if given ([[SurrogateWeights]]); the `surrogateMotionAttenuation` discounts the instability
+  * of a moving neighbourhood.
   */
 final class OfflineLearnerGNN(
     min: Double,
@@ -47,7 +48,8 @@ final class OfflineLearnerGNN(
     convergenceLoss: ConvergenceLoss = ConvergenceLoss.Huber,
     richContext: Boolean = false,
     surrogateWeight: Double = 0.0,
-    highSurrogateWeight: Option[Double] = None
+    highSurrogateWeight: Option[Double] = None,
+    surrogateMotionAttenuation: Double = 0.0
 ) extends EpisodicOfflineLearner[GraphTransition](
       randomKey,
       weight,
@@ -71,7 +73,8 @@ final class OfflineLearnerGNN(
       SurrogateWeights.of(surrogateWeight, highSurrogateWeight, rewardShape.scale),
       rewardShape,
       min,
-      max
+      max,
+      surrogateMotionAttenuation
     )
   private val networkSeed: Int = LearnerSeeds.networks(randomKey, weight)
   private val actor: TorchNetwork[EdgeGATBlock] = actorNetwork("gat-actor", seedOffset = 101)

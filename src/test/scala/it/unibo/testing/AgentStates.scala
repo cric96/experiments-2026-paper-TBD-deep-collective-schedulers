@@ -9,12 +9,14 @@ import scala.collection.immutable.Queue
 object AgentStates:
 
   /** What a node knows about one device (itself included) in one snapshot. */
-  final case class Reading(output: Double, distance: Double = 0.0, action: Double = 1.0)
+  final case class Reading(output: Double, distance: Double = 0.0, action: Double = 1.0, speed: Double = 0.0)
 
   /** A state of node `me` from its oldest to its newest neighbourhood snapshot. */
   def of(me: Int, snapshots: Map[Int, Reading]*): AgentState =
-    val history = Queue.from(snapshots.map(_.view.mapValues(r => NeighborInfo(r.output, r.distance, r.action)).toMap))
+    val history = Queue.from(snapshots.map(_.view.mapValues(reading).toMap))
     AgentState(me, history)
+
+  private def reading(r: Reading): NeighborInfo = NeighborInfo(r.output, r.distance, r.action, speed = r.speed)
 
   /** Node 0 on a line 0 - 1 - 2 (10 m apart) of a gradient from node 2, whose source moves to node 0. */
   val sourceMovingTowardsMe: AgentState = of(

@@ -77,6 +77,7 @@ class SimulationFilesSpec extends AnyFlatSpec with Matchers:
     "gamma" -> 0.95,
     "surrogateWeight" -> 0.3,
     "highSurrogateWeight" -> 2.0,
+    "surrogateMotionAttenuation" -> 1.0,
     "extraSwitches" -> "50.0",
     "trainingDiagnostics" -> 1,
     "convergenceLoss" -> "Squared",
