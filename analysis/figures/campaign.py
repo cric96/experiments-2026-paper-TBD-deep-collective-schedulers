@@ -85,6 +85,7 @@ VARIANT_LABELS = {
     "network-error-hybrid-scheduled-long-training": "Full-range β, scheduled hybrid, 40 training episodes",
     "network-error-hybrid-scheduled-long-training-frequent-switches":
         "Full-range β, scheduled hybrid, 40 training episodes, four switches",
+    "network-error-hybrid-scheduled-motion-aware": "Full-range β, scheduled hybrid, surrogate discounted in motion",
 }
 PROGRAMS = {0: "Gradient", 1: "Hop count", 2: "Broadcast", 3: "Collect", 4: "Election"}
 PHASES = {"bootstrap": "Start-up\n0–40 s", "quiet": "Stable\n40–100 s", "event": "Event\n100–150 s",

@@ -245,6 +245,12 @@ NETWORK_EXPOSURE = {'network-error-hybrid-scheduled-frequent-switches': dict(SCH
                         dict(SCHEDULED, **LONG_TRAINING, **FREQUENT_SWITCHES)}
 VARIANTS.update(NETWORK_EXPOSURE)
 NETWORK_VARIANTS = (*NETWORK_VARIANTS, *NETWORK_EXPOSURE)
+# In motion every method is on the front of the fixed periods, and the scheduled hybrid pays more rounds than the
+# baselines for the same error (test-network-error): the surrogate leaves the instability of a moving neighbourhood to
+# the measured cost (HybridConvergence.motionAttenuation).
+NETWORK_MOTION_AWARE = {'network-error-hybrid-scheduled-motion-aware': dict(SCHEDULED, surrogateMotionAttenuation=1.0)}
+VARIANTS.update(NETWORK_MOTION_AWARE)
+NETWORK_VARIANTS = (*NETWORK_VARIANTS, *NETWORK_MOTION_AWARE)
 # Trickle and the gradual controller tuned by beta: after a change they fall back to the best period of an urgent node
 # on the linear scale instead of 0.5 s. Shared controls like the fixed periods, on the grid of the learned variants.
 TUNED_BASELINES = 'tuned-baselines'

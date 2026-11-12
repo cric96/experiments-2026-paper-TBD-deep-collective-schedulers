@@ -451,6 +451,13 @@ def test_the_exposure_variants_train_the_scheduled_hybrid_longer_or_on_more_sour
         assert variant in NETWORK_VARIANTS and grid_of(variant) == grid_of('network-error-hybrid-scheduled')
 
 
+def test_the_motion_aware_hybrid_discounts_the_surrogate_of_a_moving_neighbourhood_only():
+    from experiments.campaign import NETWORK_VARIANTS, grid_of
+    variant = 'network-error-hybrid-scheduled-motion-aware'
+    assert VARIANTS[variant] == VARIANTS['network-error-hybrid-scheduled'] | dict(surrogateMotionAttenuation=1.0)
+    assert variant in NETWORK_VARIANTS and grid_of(variant) == grid_of('network-error-hybrid-scheduled')
+
+
 def test_the_baseline_grid_runs_trickle_and_the_gradual_controller_once_per_topology_at_every_pair_of_periods():
     from experiments.campaign import BASELINE_PERIODS, baseline_grid_variant
     plan = list(jobs('validation', [], shared=False, baseline_grid=True))
