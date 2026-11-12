@@ -1,6 +1,6 @@
 [versions]
 alchemist = "47.0.8"
-scala = "3.10.0"
+scala = "3.10.1"
 djl = "0.40.0"
 scalatest = "3.3.0-SNAP4"
 scalatest-junit-runner = "0.2.0"
