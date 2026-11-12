@@ -41,6 +41,17 @@ CORE = [STATIC, DYNAMIC[0], *PROGRAMS]
 SCENARIOS = {'validation': CORE, 'test': [STATIC, *DYNAMIC, *PROGRAMS, *SIZES]}
 # Test: the legacy control only where the previous experiments can be compared; beta study on the core scenarios.
 LEGACY_SCENARIOS = [STATIC, *DYNAMIC, *PROGRAMS]
+# Seconds after the source switch (halfway) at which every node of a composite episode (SourceSwitchThenMotion) starts
+# moving, in the training of the network-error variants and in the composite scenario.
+COMPOSITE_MOTION_DELAY = 50.
+# The composite episode as an evaluation scenario (test, on its own campaign): the source switches halfway, then every
+# node moves at 1 m/s from COMPOSITE_MOTION_DELAY later to the end of the episode (motionDuration).
+COMPOSITE = ('composite', 0, 100, 1.)
+# The scenarios of the beta study of a test campaign and of the grid of the baselines.
+COMPARED = [*CORE, COMPOSITE]
+# What a family changes in the evaluation episodes: the event halfway (a source switch by default).
+FAMILY_SETTINGS = {'dynamic': dict(episodeEvent='RegionStartsMoving'),
+                   'composite': dict(episodeEvent='SourceSwitchThenMotion', motionDelay=COMPOSITE_MOTION_DELAY)}
 # Same objective for feature ablations. Legacy control alone uses the original objective.
 # Retention of the neighbours' data: with the message timing of Alchemist 25 (SendPreviousExport) an export arrives
 # up to one period old and is replaced one period later, so it must outlast two of the longest periods (5 s); 15 s
@@ -143,7 +154,7 @@ VARIANTS = {
 # diagnostics: <run>_training.csv.
 NETWORK_ERROR = dict(VARIANTS['neighbourhood-error-full-range'], costSignal='Network', privilegedCritic=1,
                      trainingDiagnostics=1, trainingEvents='SourceSwitchThenMotion', trainingSpeeds='1,2',
-                     motionDelay=50., trainingMotionDuration=30.)
+                     motionDelay=COMPOSITE_MOTION_DELAY, trainingMotionDuration=30.)
 # The spatial discounts of the pilot of the global objective (validation-network-error-discount).
 NETWORK_DISCOUNTS = (.5, .75)
 VARIANTS['network-error-full-range'] = NETWORK_ERROR
@@ -316,8 +327,8 @@ def settings_of(variant, algorithm, beta, training_seed, evaluation_seed, scenar
     legacy = settings.pop('legacy', False)
     settings.update(random=training_seed, evaluationSeed=evaluation_seed, evaluationNodes=nodes,
                     algoId=({0: 9, 1: 8}[algorithm] if legacy else algorithm), weight=beta,
-                    targetProgram=program, speed=speed,
-                    episodeEvent='RegionStartsMoving' if family == 'dynamic' else 'SourceSwitch')
+                    targetProgram=program, speed=speed, episodeEvent='SourceSwitch')
+    settings.update(FAMILY_SETTINGS.get(family, {}))
     if smoke:
         settings.update(trainingEpisodes=1, episodes=2, episodeLength=20., stepsPerEpisode=1, motionDuration=5.)
     return settings
@@ -380,7 +391,7 @@ def baseline_grid_jobs(split, scenarios, smoke=False, overrides=None):
 
 
 def jobs(split, variants, smoke=False, shared=True, finals=None, algorithms=LEARNED, families=None, overrides=None,
-         beta_study_only=False, swept=(), controls=True, tuned_baselines=False, baseline_grid=False):
+         beta_study_only=False, swept=(), controls=True, tuned_baselines=False, baseline_grid=False, composite=False):
     """Validation: every variant on the core scenarios at the focus beta. Test: `variants` (the control and the
     selections) on every scenario, the legacy control on the comparable ones, and the beta study of the final variant
     of each architecture (`finals`: algorithm -> variant, by default the last of `variants`). `algorithms` and
@@ -389,11 +400,9 @@ def jobs(split, variants, smoke=False, shared=True, finals=None, algorithms=LEAR
     `swept` families run every variant at every beta (a validation of the trade-off curves); without `controls`, a
     test campaign leaves out the legacy control (another campaign of the same seeds has it); `tuned_baselines` adds
     the baselines tuned by beta on the grid of the last variant, swept where the variants are; `baseline_grid` the
-    baselines on the grid of their periods (BASELINE_PERIODS). Each variant sweeps its own grid of betas
-    (`grid_of`)."""
-    scenarios = SCENARIOS[split]
-    if smoke:
-        scenarios = [STATIC, *PROGRAMS]
+    baselines on the grid of their periods (BASELINE_PERIODS), on the core scenarios only; `composite` replaces the
+    scenarios with the composite one (COMPOSITE). Each variant sweeps its own grid of betas (`grid_of`)."""
+    scenarios = [COMPOSITE] if composite else [STATIC, *PROGRAMS] if smoke else SCENARIOS[split]
     if families:
         scenarios = [scenario for scenario in scenarios if scenario[0] in families]
     for variant in ([] if beta_study_only else variants):
@@ -406,7 +415,7 @@ def jobs(split, variants, smoke=False, shared=True, finals=None, algorithms=LEAR
         if controls and 'legacy' not in variants and not beta_study_only:
             yield from learned_jobs(split, 'legacy', [s for s in LEGACY_SCENARIOS if s in scenarios], [FOCUS_BETA], smoke,
                                     overrides=overrides)
-        beta_scenarios = [s for s in CORE if s in scenarios]
+        beta_scenarios = [s for s in COMPARED if s in scenarios]
         for algorithm in LEARNED:
             final = (finals or {}).get(algorithm, variants[-1])
             grid, focus = grid_of(final)
@@ -419,15 +428,16 @@ def jobs(split, variants, smoke=False, shared=True, finals=None, algorithms=LEAR
         yield from tuned_baseline_jobs(split, scenarios, swept_scenarios, grid_of(variants[-1]), smoke, overrides,
                                        tuned_control_of(variants[-1]))
     if baseline_grid:
-        yield from baseline_grid_jobs(split, scenarios, smoke, overrides)
+        yield from baseline_grid_jobs(split, [s for s in scenarios if s in COMPARED], smoke, overrides)
 
 
 def prepare(split, variants, smoke=False, name=None, shared=True, finals=None, algorithms=LEARNED, families=None,
-            overrides=None, beta_study_only=False, swept=(), controls=True, tuned_baselines=False, baseline_grid=False):
+            overrides=None, beta_study_only=False, swept=(), controls=True, tuned_baselines=False, baseline_grid=False,
+            composite=False):
     home = HOME / (name or ('smoke' if smoke else split))
     home.mkdir(parents=True, exist_ok=True)
     plan = list(jobs(split, variants, smoke, shared, finals, algorithms, families, overrides, beta_study_only, swept,
-                     controls, tuned_baselines, baseline_grid))
+                     controls, tuned_baselines, baseline_grid, composite))
     manifest = home / 'manifest.json'
     if manifest.exists():
         if json.loads(manifest.read_text()) != plan:
@@ -533,6 +543,9 @@ def main():
                         help='Also Trickle and the gradual controller tuned by beta, on the grid of the variants')
     parser.add_argument('--baseline-grid', action='store_true',
                         help='Also Trickle and the gradual controller on the grid of their periods (BASELINE_PERIODS)')
+    parser.add_argument('--composite', action='store_true',
+                        help='Only the composite scenario (COMPOSITE: source switch, then every node moves), with the '
+                             'beta study on it')
     parser.add_argument('--set', dest='overrides', nargs='+', default=[], metavar='NAME=VALUE',
                         help='Setting of every run of the campaign, the shared controls included (e.g. retention=15)')
     args = parser.parse_args()
@@ -549,7 +562,7 @@ def main():
     home, plan = prepare(args.split, variants, args.smoke, args.name, not args.without_shared, finals,
                          tuple(args.algorithms), args.families, overrides or None, args.beta_study_only,
                          tuple(args.sweep_families), not args.without_controls, args.tuned_baselines,
-                         args.baseline_grid)
+                         args.baseline_grid, args.composite)
     print(f'{len(plan)} runs: {home}', flush=True)
     if args.action == 'run':
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
