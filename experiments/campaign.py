@@ -231,6 +231,20 @@ NETWORK_SCHEDULED_HYBRID = {'network-error-hybrid-scheduled': dict(HYBRID_BASE, 
                                                                    highSurrogateWeight=2., **MORE_DATA)}
 VARIANTS.update(NETWORK_SCHEDULED_HYBRID)
 NETWORK_VARIANTS = (*NETWORK_VARIANTS, *NETWORK_SCHEDULED_HYBRID)
+# Exposure pilot (2026-11-12): on the test seeds the scheduled hybrid gains at the start-up but is only on par with the
+# baselines after a source switch, which its training shows twice per episode (at 50 s and halfway). It trains twice as
+# long (same evaluation episodes), on twice as many switches (at 35, 70, 100 and 125 s: the motion follows at 150 s),
+# or both.
+LONG_TRAINING = dict(trainingEpisodes=4 * COMMON['trainingEpisodes'],
+                     episodes=COMMON['episodes'] + 3 * COMMON['trainingEpisodes'])
+FREQUENT_SWITCHES = dict(extraSwitches='35.0,70.0,125.0')
+SCHEDULED = NETWORK_SCHEDULED_HYBRID['network-error-hybrid-scheduled']
+NETWORK_EXPOSURE = {'network-error-hybrid-scheduled-frequent-switches': dict(SCHEDULED, **FREQUENT_SWITCHES),
+                    'network-error-hybrid-scheduled-long-training': dict(SCHEDULED, **LONG_TRAINING),
+                    'network-error-hybrid-scheduled-long-training-frequent-switches':
+                        dict(SCHEDULED, **LONG_TRAINING, **FREQUENT_SWITCHES)}
+VARIANTS.update(NETWORK_EXPOSURE)
+NETWORK_VARIANTS = (*NETWORK_VARIANTS, *NETWORK_EXPOSURE)
 # Trickle and the gradual controller tuned by beta: after a change they fall back to the best period of an urgent node
 # on the linear scale instead of 0.5 s. Shared controls like the fixed periods, on the grid of the learned variants.
 TUNED_BASELINES = 'tuned-baselines'

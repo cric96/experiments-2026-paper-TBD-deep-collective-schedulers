@@ -433,6 +433,24 @@ def test_the_scheduled_hybrid_lets_beta_choose_the_surrogate_weight():
                                                                                        highSurrogateWeight=2.)
 
 
+def test_the_exposure_variants_train_the_scheduled_hybrid_longer_or_on_more_source_switches():
+    from experiments.campaign import NETWORK_VARIANTS, grid_of
+    scheduled = VARIANTS['network-error-hybrid-scheduled']
+    frequent = VARIANTS['network-error-hybrid-scheduled-frequent-switches']
+    longer = VARIANTS['network-error-hybrid-scheduled-long-training']
+    both = VARIANTS['network-error-hybrid-scheduled-long-training-frequent-switches']
+    switches = lambda settings: len(settings['extraSwitches'].split(','))
+    assert frequent == scheduled | dict(extraSwitches=frequent['extraSwitches']) and switches(frequent) > switches(scheduled)
+    assert longer == scheduled | dict(trainingEpisodes=longer['trainingEpisodes'], episodes=longer['episodes'])
+    assert longer['trainingEpisodes'] == 2 * scheduled['trainingEpisodes']
+    # The same evaluation episodes.
+    assert longer['episodes'] - longer['trainingEpisodes'] == scheduled['episodes'] - scheduled['trainingEpisodes']
+    assert both == longer | dict(extraSwitches=frequent['extraSwitches'])
+    for variant in ('network-error-hybrid-scheduled-frequent-switches', 'network-error-hybrid-scheduled-long-training',
+                    'network-error-hybrid-scheduled-long-training-frequent-switches'):
+        assert variant in NETWORK_VARIANTS and grid_of(variant) == grid_of('network-error-hybrid-scheduled')
+
+
 def test_the_baseline_grid_runs_trickle_and_the_gradual_controller_once_per_topology_at_every_pair_of_periods():
     from experiments.campaign import BASELINE_PERIODS, baseline_grid_variant
     plan = list(jobs('validation', [], shared=False, baseline_grid=True))
